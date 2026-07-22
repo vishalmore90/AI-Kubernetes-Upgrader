@@ -1,0 +1,712 @@
+"""
+sample_generator.py
+===================
+Generates realistic sample Kubernetes cluster snapshots for testing and demonstration.
+
+Produces a JSON snapshot that represents a realistic production cluster
+with various risk factors including:
+- PSP usage (if targeting 1.27->1.30, triggers PSP removal warning)
+- Mixed API versions
+- Multiple operators/controllers
+- Storage classes with in-tree provisioners
+- Admission webhooks with various failure policies
+"""
+
+import json
+from typing import Dict, Any
+
+
+def generate_sample_cluster(
+    source_version: str = "1.27",
+    target_version: str = "1.30",
+    include_psp: bool = True,
+    include_docker_runtime: bool = False,
+) -> Dict[str, Any]:
+    """
+    Generate a realistic sample cluster snapshot.
+
+    Args:
+        source_version: Current Kubernetes version
+        target_version: Target upgrade version
+        include_psp: Whether to include PodSecurityPolicies (creates critical finding for 1.25+)
+        include_docker_runtime: Whether to include Docker runtime nodes (creates critical finding for 1.24+)
+    """
+    cluster = {
+        "k8s_version": source_version,
+        "k8s_git_version": f"v{source_version}.5",
+        "api_server_version": f"v{source_version}.5",
+        "platform": "linux/amd64",
+        "cluster_name": "production-cluster",
+        "is_managed": False,
+        "managed_provider": "self-managed",
+        "ha_control_plane": True,
+        "namespaces": [
+            "default", "kube-system", "kube-public", "kube-node-lease",
+            "monitoring", "ingress-nginx", "cert-manager", "argocd",
+            "production", "staging", "velero", "logging"
+        ],
+        "nodes": _generate_nodes(source_version, include_docker_runtime),
+        "deployments": _generate_deployments(),
+        "statefulsets": _generate_statefulsets(),
+        "daemonsets": _generate_daemonsets(),
+        "jobs": [],
+        "cronjobs": _generate_cronjobs(),
+        "crds": _generate_crds(),
+        "validating_webhooks": _generate_validating_webhooks(),
+        "mutating_webhooks": _generate_mutating_webhooks(),
+        "storage_classes": _generate_storage_classes(),
+        "persistent_volumes": _generate_pvs(),
+        "persistent_volume_claims": _generate_pvcs(),
+        "network_policies": _generate_network_policies(),
+        "cni_plugin": "calico",
+        "ingress_controller": "ingress-nginx",
+        "pod_security_policies": ["restricted", "privileged", "baseline"] if include_psp else [],
+        "has_pod_security_admission": False,
+        "privileged_workloads": ["monitoring/prometheus-node-exporter", "kube-system/cilium"],
+        "node_cpu_pressures": {},
+        "node_memory_pressures": {},
+        "node_disk_pressures": {},
+        "detected_operators": {
+            "cert-manager": "v1.11.0",
+            "ingress-nginx": "v1.7.0",
+            "metrics-server": "v0.6.3",
+            "cluster-autoscaler": "v1.27.2",
+            "kube-prometheus-stack": "v45.7.0",
+            "argo-cd": "v2.7.3",
+            "velero": "v1.11.0",
+        },
+        "api_resources": [],
+        "api_services": [],
+        "all_resources": _generate_all_resources(),
+        "collection_errors": [],
+    }
+
+    return cluster
+
+
+def _generate_nodes(k8s_version: str, include_docker: bool) -> list:
+    nodes = [
+        {
+            "name": "control-plane-1",
+            "role": "control-plane",
+            "k8s_version": f"v{k8s_version}.5",
+            "os_image": "Ubuntu 22.04.3 LTS",
+            "kernel_version": "5.15.0-91-generic",
+            "container_runtime": "containerd://1.6.24",
+            "status": "Ready",
+            "cpu": "4",
+            "memory": "16Gi",
+            "architecture": "amd64",
+        },
+        {
+            "name": "control-plane-2",
+            "role": "control-plane",
+            "k8s_version": f"v{k8s_version}.5",
+            "os_image": "Ubuntu 22.04.3 LTS",
+            "kernel_version": "5.15.0-91-generic",
+            "container_runtime": "containerd://1.6.24",
+            "status": "Ready",
+            "cpu": "4",
+            "memory": "16Gi",
+            "architecture": "amd64",
+        },
+        {
+            "name": "control-plane-3",
+            "role": "control-plane",
+            "k8s_version": f"v{k8s_version}.5",
+            "os_image": "Ubuntu 22.04.3 LTS",
+            "kernel_version": "5.15.0-91-generic",
+            "container_runtime": "containerd://1.6.24",
+            "status": "Ready",
+            "cpu": "4",
+            "memory": "16Gi",
+            "architecture": "amd64",
+        },
+    ]
+
+    # Worker nodes
+    for i in range(1, 6):
+        runtime = "docker://20.10.24" if include_docker and i == 1 else "containerd://1.6.24"
+        nodes.append({
+            "name": f"worker-{i}",
+            "role": "worker",
+            "k8s_version": f"v{k8s_version}.5",
+            "os_image": "Ubuntu 22.04.3 LTS",
+            "kernel_version": "5.15.0-91-generic",
+            "container_runtime": runtime,
+            "status": "Ready",
+            "cpu": "8",
+            "memory": "32Gi",
+            "architecture": "amd64",
+        })
+
+    return nodes
+
+
+def _generate_deployments() -> list:
+    return [
+        {
+            "namespace": "production",
+            "kind": "Deployment",
+            "name": "api-server",
+            "api_version": "apps/v1",
+            "replicas": 3,
+            "ready_replicas": 3,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["myregistry.io/api-server:2.1.0"],
+            "labels": {"app": "api-server", "env": "production"},
+            "annotations": {},
+        },
+        {
+            "namespace": "production",
+            "kind": "Deployment",
+            "name": "frontend",
+            "api_version": "apps/v1",
+            "replicas": 5,
+            "ready_replicas": 5,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["myregistry.io/frontend:3.0.1"],
+            "labels": {"app": "frontend", "env": "production"},
+            "annotations": {},
+        },
+        {
+            "namespace": "production",
+            "kind": "Deployment",
+            "name": "worker-service",
+            "api_version": "apps/v1",
+            "replicas": 2,
+            "ready_replicas": 2,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["myregistry.io/worker:1.5.0"],
+            "labels": {"app": "worker"},
+            "annotations": {},
+        },
+        {
+            "namespace": "monitoring",
+            "kind": "Deployment",
+            "name": "grafana",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["grafana/grafana:10.0.0"],
+            "labels": {"app.kubernetes.io/name": "grafana"},
+            "annotations": {},
+        },
+        {
+            "namespace": "cert-manager",
+            "kind": "Deployment",
+            "name": "cert-manager",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["quay.io/jetstack/cert-manager-controller:v1.11.0"],
+            "labels": {"app.kubernetes.io/name": "cert-manager"},
+            "annotations": {},
+        },
+        {
+            "namespace": "cert-manager",
+            "kind": "Deployment",
+            "name": "cert-manager-cainjector",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["quay.io/jetstack/cert-manager-cainjector:v1.11.0"],
+            "labels": {"app.kubernetes.io/name": "cert-manager"},
+            "annotations": {},
+        },
+        {
+            "namespace": "cert-manager",
+            "kind": "Deployment",
+            "name": "cert-manager-webhook",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["quay.io/jetstack/cert-manager-webhook:v1.11.0"],
+            "labels": {"app.kubernetes.io/name": "cert-manager"},
+            "annotations": {},
+        },
+        {
+            "namespace": "ingress-nginx",
+            "kind": "Deployment",
+            "name": "ingress-nginx-controller",
+            "api_version": "apps/v1",
+            "replicas": 2,
+            "ready_replicas": 2,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["registry.k8s.io/ingress-nginx/controller:v1.7.0"],
+            "labels": {"app.kubernetes.io/name": "ingress-nginx"},
+            "annotations": {},
+        },
+        {
+            "namespace": "kube-system",
+            "kind": "Deployment",
+            "name": "metrics-server",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["registry.k8s.io/metrics-server/metrics-server:v0.6.3"],
+            "labels": {"k8s-app": "metrics-server"},
+            "annotations": {},
+        },
+        {
+            "namespace": "kube-system",
+            "kind": "Deployment",
+            "name": "cluster-autoscaler",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["registry.k8s.io/autoscaling/cluster-autoscaler:v1.27.2"],
+            "labels": {"app": "cluster-autoscaler"},
+            "annotations": {},
+        },
+        {
+            "namespace": "argocd",
+            "kind": "Deployment",
+            "name": "argocd-server",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["quay.io/argoproj/argocd:v2.7.3"],
+            "labels": {"app.kubernetes.io/name": "argocd-server"},
+            "annotations": {},
+        },
+        {
+            "namespace": "argocd",
+            "kind": "Deployment",
+            "name": "argocd-application-controller",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["quay.io/argoproj/argocd:v2.7.3"],
+            "labels": {"app.kubernetes.io/part-of": "argocd"},
+            "annotations": {},
+        },
+        {
+            "namespace": "monitoring",
+            "kind": "Deployment",
+            "name": "kube-prometheus-stack-operator",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["quay.io/prometheus-operator/prometheus-operator:v0.65.0"],
+            "labels": {"app.kubernetes.io/name": "kube-prometheus-stack"},
+            "annotations": {},
+        },
+        {
+            "namespace": "velero",
+            "kind": "Deployment",
+            "name": "velero",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["velero/velero:v1.11.0"],
+            "labels": {"app.kubernetes.io/name": "velero"},
+            "annotations": {},
+        },
+    ]
+
+
+def _generate_statefulsets() -> list:
+    return [
+        {
+            "namespace": "production",
+            "kind": "StatefulSet",
+            "name": "postgresql",
+            "api_version": "apps/v1",
+            "replicas": 3,
+            "ready_replicas": 3,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["postgres:15.2"],
+            "labels": {"app": "postgresql"},
+            "annotations": {},
+        },
+        {
+            "namespace": "production",
+            "kind": "StatefulSet",
+            "name": "redis-cluster",
+            "api_version": "apps/v1",
+            "replicas": 6,
+            "ready_replicas": 6,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["redis:7.0"],
+            "labels": {"app": "redis"},
+            "annotations": {},
+        },
+        {
+            "namespace": "monitoring",
+            "kind": "StatefulSet",
+            "name": "prometheus",
+            "api_version": "apps/v1",
+            "replicas": 1,
+            "ready_replicas": 1,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["quay.io/prometheus/prometheus:v2.44.0"],
+            "labels": {"app.kubernetes.io/name": "prometheus"},
+            "annotations": {},
+        },
+    ]
+
+
+def _generate_daemonsets() -> list:
+    return [
+        {
+            "namespace": "kube-system",
+            "kind": "DaemonSet",
+            "name": "calico-node",
+            "api_version": "apps/v1",
+            "replicas": 8,
+            "ready_replicas": 8,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["calico/node:v3.25.0"],
+            "labels": {"k8s-app": "calico-node"},
+            "annotations": {},
+        },
+        {
+            "namespace": "monitoring",
+            "kind": "DaemonSet",
+            "name": "prometheus-node-exporter",
+            "api_version": "apps/v1",
+            "replicas": 8,
+            "ready_replicas": 8,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["quay.io/prometheus/node-exporter:v1.6.0"],
+            "labels": {"app.kubernetes.io/name": "prometheus-node-exporter"},
+            "annotations": {},
+        },
+        {
+            "namespace": "kube-system",
+            "kind": "DaemonSet",
+            "name": "kube-proxy",
+            "api_version": "apps/v1",
+            "replicas": 8,
+            "ready_replicas": 8,
+            "age": "2023-06-15T10:00:00Z",
+            "images": [f"registry.k8s.io/kube-proxy:v1.27.5"],
+            "labels": {"k8s-app": "kube-proxy"},
+            "annotations": {},
+        },
+    ]
+
+
+def _generate_cronjobs() -> list:
+    return [
+        {
+            "namespace": "production",
+            "kind": "CronJob",
+            "name": "db-backup",
+            "api_version": "batch/v1",
+            "replicas": 0,
+            "ready_replicas": 0,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["myregistry.io/backup:1.0"],
+            "labels": {"app": "db-backup"},
+            "annotations": {},
+        },
+        {
+            "namespace": "production",
+            "kind": "CronJob",
+            "name": "data-cleanup",
+            "api_version": "batch/v1",
+            "replicas": 0,
+            "ready_replicas": 0,
+            "age": "2023-06-15T10:00:00Z",
+            "images": ["myregistry.io/cleanup:2.0"],
+            "labels": {"app": "data-cleanup"},
+            "annotations": {},
+        },
+    ]
+
+
+def _generate_crds() -> list:
+    return [
+        {
+            "name": "certificates.cert-manager.io",
+            "group": "cert-manager.io",
+            "kind": "Certificate",
+            "versions": ["v1"],
+            "storage_version": "v1",
+            "served_versions": ["v1"],
+            "scope": "Namespaced",
+            "has_conversion_webhook": False,
+            "conversion_strategy": "None",
+            "has_validation_schema": True,
+            "established": True,
+        },
+        {
+            "name": "issuers.cert-manager.io",
+            "group": "cert-manager.io",
+            "kind": "Issuer",
+            "versions": ["v1"],
+            "storage_version": "v1",
+            "served_versions": ["v1"],
+            "scope": "Namespaced",
+            "has_conversion_webhook": False,
+            "conversion_strategy": "None",
+            "has_validation_schema": True,
+            "established": True,
+        },
+        {
+            "name": "clusterissuers.cert-manager.io",
+            "group": "cert-manager.io",
+            "kind": "ClusterIssuer",
+            "versions": ["v1"],
+            "storage_version": "v1",
+            "served_versions": ["v1"],
+            "scope": "Cluster",
+            "has_conversion_webhook": False,
+            "conversion_strategy": "None",
+            "has_validation_schema": True,
+            "established": True,
+        },
+        {
+            "name": "applications.argoproj.io",
+            "group": "argoproj.io",
+            "kind": "Application",
+            "versions": ["v1alpha1"],
+            "storage_version": "v1alpha1",
+            "served_versions": ["v1alpha1"],
+            "scope": "Namespaced",
+            "has_conversion_webhook": False,
+            "conversion_strategy": "None",
+            "has_validation_schema": True,
+            "established": True,
+        },
+        {
+            "name": "prometheuses.monitoring.coreos.com",
+            "group": "monitoring.coreos.com",
+            "kind": "Prometheus",
+            "versions": ["v1"],
+            "storage_version": "v1",
+            "served_versions": ["v1"],
+            "scope": "Namespaced",
+            "has_conversion_webhook": False,
+            "conversion_strategy": "None",
+            "has_validation_schema": True,
+            "established": True,
+        },
+        {
+            "name": "servicemonitors.monitoring.coreos.com",
+            "group": "monitoring.coreos.com",
+            "kind": "ServiceMonitor",
+            "versions": ["v1"],
+            "storage_version": "v1",
+            "served_versions": ["v1"],
+            "scope": "Namespaced",
+            "has_conversion_webhook": False,
+            "conversion_strategy": "None",
+            "has_validation_schema": True,
+            "established": True,
+        },
+        {
+            "name": "backups.velero.io",
+            "group": "velero.io",
+            "kind": "Backup",
+            "versions": ["v1"],
+            "storage_version": "v1",
+            "served_versions": ["v1"],
+            "scope": "Namespaced",
+            "has_conversion_webhook": False,
+            "conversion_strategy": "None",
+            "has_validation_schema": True,
+            "established": True,
+        },
+        {
+            "name": "legacyconfigs.example.io",
+            "group": "example.io",
+            "kind": "LegacyConfig",
+            "versions": ["v1alpha1", "v1beta1"],
+            "storage_version": "v1alpha1",
+            "served_versions": ["v1alpha1", "v1beta1"],
+            "scope": "Namespaced",
+            "has_conversion_webhook": True,
+            "conversion_strategy": "Webhook",
+            "has_validation_schema": False,
+            "established": True,
+        },
+    ]
+
+
+def _generate_validating_webhooks() -> list:
+    return [
+        {
+            "name": "cert-manager-webhook",
+            "kind": "Validating",
+            "failure_policy": "Fail",
+            "side_effects": "None",
+            "admission_review_versions": ["v1"],
+            "rules": [{"operations": ["CREATE", "UPDATE"], "resources": ["certificates", "issuers"]}],
+            "timeout_seconds": 10,
+            "namespace_selector": None,
+        },
+        {
+            "name": "ingress-nginx-admission",
+            "kind": "Validating",
+            "failure_policy": "Fail",
+            "side_effects": "None",
+            "admission_review_versions": ["v1"],
+            "rules": [{"operations": ["CREATE", "UPDATE"], "resources": ["ingresses"]}],
+            "timeout_seconds": 10,
+            "namespace_selector": None,
+        },
+        {
+            "name": "legacy-validator",
+            "kind": "Validating",
+            "failure_policy": "Fail",
+            "side_effects": "Unknown",
+            "admission_review_versions": ["v1beta1"],
+            "rules": [{"operations": ["CREATE", "UPDATE", "DELETE"], "resources": ["*"]}],
+            "timeout_seconds": 30,
+            "namespace_selector": None,
+        },
+    ]
+
+
+def _generate_mutating_webhooks() -> list:
+    return [
+        {
+            "name": "cert-manager-webhook-mutator",
+            "kind": "Mutating",
+            "failure_policy": "Fail",
+            "side_effects": "None",
+            "admission_review_versions": ["v1"],
+            "rules": [{"operations": ["CREATE", "UPDATE"], "resources": ["pods"]}],
+            "timeout_seconds": 10,
+            "namespace_selector": None,
+        },
+        {
+            "name": "argocd-mutating-webhook",
+            "kind": "Mutating",
+            "failure_policy": "Ignore",
+            "side_effects": "NoneOnDryRun",
+            "admission_review_versions": ["v1"],
+            "rules": [{"operations": ["CREATE", "UPDATE"], "resources": ["applications"]}],
+            "timeout_seconds": 5,
+            "namespace_selector": None,
+        },
+    ]
+
+
+def _generate_storage_classes() -> list:
+    return [
+        {
+            "name": "standard",
+            "provisioner": "rancher.io/local-path",
+            "reclaim_policy": "Delete",
+            "volume_binding_mode": "WaitForFirstConsumer",
+            "allow_volume_expansion": True,
+            "is_default": True,
+        },
+        {
+            "name": "fast-ssd",
+            "provisioner": "kubernetes.io/no-provisioner",
+            "reclaim_policy": "Retain",
+            "volume_binding_mode": "WaitForFirstConsumer",
+            "allow_volume_expansion": False,
+            "is_default": False,
+        },
+        {
+            "name": "legacy-aws-ebs",
+            "provisioner": "kubernetes.io/aws-ebs",
+            "reclaim_policy": "Delete",
+            "volume_binding_mode": "Immediate",
+            "allow_volume_expansion": True,
+            "is_default": False,
+        },
+    ]
+
+
+def _generate_pvs() -> list:
+    return [
+        {
+            "name": "pv-postgresql-0",
+            "capacity": "100Gi",
+            "access_modes": ["ReadWriteOnce"],
+            "reclaim_policy": "Retain",
+            "status": "Bound",
+            "storage_class": "fast-ssd",
+            "claim_ref": "production/postgresql-data-postgresql-0",
+        },
+        {
+            "name": "pv-prometheus-0",
+            "capacity": "50Gi",
+            "access_modes": ["ReadWriteOnce"],
+            "reclaim_policy": "Delete",
+            "status": "Bound",
+            "storage_class": "standard",
+            "claim_ref": "monitoring/prometheus-db-prometheus-0",
+        },
+    ]
+
+
+def _generate_pvcs() -> list:
+    return [
+        {
+            "namespace": "production",
+            "name": "postgresql-data-postgresql-0",
+            "status": "Bound",
+            "volume": "pv-postgresql-0",
+            "capacity": "100Gi",
+            "access_modes": ["ReadWriteOnce"],
+            "storage_class": "fast-ssd",
+        },
+        {
+            "namespace": "monitoring",
+            "name": "prometheus-db-prometheus-0",
+            "status": "Bound",
+            "volume": "pv-prometheus-0",
+            "capacity": "50Gi",
+            "access_modes": ["ReadWriteOnce"],
+            "storage_class": "standard",
+        },
+    ]
+
+
+def _generate_network_policies() -> list:
+    return [
+        {
+            "namespace": "production",
+            "name": "deny-all-ingress",
+            "pod_selector": {},
+            "policy_types": ["Ingress"],
+        },
+        {
+            "namespace": "production",
+            "name": "allow-api-server",
+            "pod_selector": {"matchLabels": {"app": "api-server"}},
+            "policy_types": ["Ingress", "Egress"],
+        },
+    ]
+
+
+def _generate_all_resources() -> list:
+    """Generate sample resources for API version scanning."""
+    return [
+        # Modern APIs - should be fine
+        {"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "production", "name": "api-server"},
+        {"apiVersion": "apps/v1", "kind": "StatefulSet", "namespace": "production", "name": "postgresql"},
+        {"apiVersion": "batch/v1", "kind": "CronJob", "namespace": "production", "name": "db-backup"},
+        {"apiVersion": "networking.k8s.io/v1", "kind": "Ingress", "namespace": "production", "name": "api-ingress"},
+        {"apiVersion": "networking.k8s.io/v1", "kind": "Ingress", "namespace": "staging", "name": "staging-ingress"},
+        {"apiVersion": "policy/v1", "kind": "PodDisruptionBudget", "namespace": "production", "name": "api-pdb"},
+        {"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "namespace": "production", "name": "api-hpa"},
+        # Old API that might still be in some configs
+        {"apiVersion": "autoscaling/v2beta2", "kind": "HorizontalPodAutoscaler", "namespace": "staging", "name": "staging-hpa"},
+    ]
+
+
+def save_sample_cluster(output_path: str, source_version: str = "1.27", target_version: str = "1.30"):
+    """Generate and save a sample cluster snapshot to a JSON file."""
+    cluster = generate_sample_cluster(source_version=source_version, target_version=target_version)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(cluster, f, indent=2)
+    return cluster
