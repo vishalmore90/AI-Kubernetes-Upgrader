@@ -1,124 +1,195 @@
-# AI-Kubernetes-Upgrader
+# ⚙️ AI-Kubernetes-Upgrader
 
-AI-Kubernetes-Upgrader is a comprehensive, automated, evidence-based Kubernetes upgrade feasibility, compatibility, and risk assessment engine. It systematically analyzes cluster resources, API deprecations/removals, CRDs, controllers, webhooks, networking, storage, and security before upgrading cluster versions.
+> A comprehensive, automated, evidence-based Kubernetes **upgrade feasibility, compatibility, and risk assessment engine**.  
+> Systematically analyses cluster resources, API deprecations, CRDs, controllers, webhooks, networking, storage, and security before you upgrade.
 
-## Features
+---
 
-This tool performs a 17-step assessment process to generate detailed risk and readiness reports:
+## 🧩 What Problem Does This Solve?
 
-*   **Cluster Information:** Gathers details about cluster version, nodes, and control plane topology.
-*   **Workload & CRD Inventory:** Catalogs all workloads and Custom Resource Definitions.
-*   **API Deprecation & Removal Analysis:** Identifies APIs in use that will be deprecated or removed in the target Kubernetes version (e.g., PodSecurityPolicy, Dockershim, FlowSchema).
-*   **Controller/Operator Compatibility:** Verifies if installed controllers (e.g., cert-manager, ingress-nginx, cluster-autoscaler) are compatible with the target Kubernetes version.
-*   **Admission Webhook Analysis:** Evaluates validating and mutating webhooks for potential failure policies that could block upgrades.
-*   **Networking, Storage & Security:** Assesses CNI plugins, storage provisioners (detects deprecated in-tree provisioners), and security policies (e.g., PSP removals).
-*   **Runtime & Resource Pressure:** Checks container runtime compatibility and node resource pressures.
-*   **Upgrade Simulation & Failure Scenarios:** Models failure scenarios to predict what might break during or after the upgrade.
-*   **Scoring & Reporting:** Generates a 10-area Risk Matrix, a Readiness Score (0-100), and a Confidence Score, along with a final upgrade decision (APPROVED, CONDITIONAL, NOT RECOMMENDED).
+Upgrading a Kubernetes cluster is risky. A single deprecated API, an incompatible admission webhook, or an in-tree storage provisioner can break production workloads silently — sometimes only discovered after the upgrade is already applied.
 
-## Components
+**AI-Kubernetes-Upgrader eliminates that risk.** Before you run a single upgrade command, the tool performs a **17-step assessment** of your cluster and generates a clear, evidence-backed verdict:
 
-*   **CLI Interface (`k8s-upgrade-assess`):** Run assessments directly from your terminal.
-*   **Interactive Web Dashboard:** A premium, dark-themed Flask dashboard to visualize the risk matrix, score gauges, and detailed assessment results.
-*   **Sample Generator:** Generates realistic cluster snapshots (with various configurable risk factors) for testing and demonstration.
-*   **Markdown & JSON Reports:** Export comprehensive reports for documentation or programmatic use.
+- ✅ **APPROVED** — Safe to proceed
+- ⚠️ **CONDITIONAL** — Proceed with specific remediations
+- ❌ **NOT RECOMMENDED** — High-risk issues must be resolved first
 
-## Installation
+---
 
-1.  Clone the repository:
-    ```bash
-    git clone https://github.com/vishalmore90/AI-Kubernetes-Upgrader.git
-    cd AI-Kubernetes-Upgrader
-    ```
+## ✨ Features
 
-2.  Install dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
+| Assessment Area | What It Checks |
+|---|---|
+| **Cluster Info** | Version, node topology, control plane health |
+| **Workload & CRD Inventory** | All workloads and Custom Resource Definitions |
+| **API Deprecation Analysis** | APIs being removed in the target version (PSP, Dockershim, FlowSchema, etc.) |
+| **Controller/Operator Compatibility** | cert-manager, ingress-nginx, cluster-autoscaler vs target version |
+| **Admission Webhook Analysis** | Validating & mutating webhooks with failure policies that could block upgrades |
+| **CNI & Networking** | Network plugin compatibility |
+| **Storage Provisioners** | Detects deprecated in-tree provisioners |
+| **Security Policies** | PSP removals and security posture |
+| **Runtime Compatibility** | Container runtime version checks |
+| **Node Resource Pressure** | CPU, memory, disk pressure across nodes |
+| **Upgrade Simulation** | Models failure scenarios to predict post-upgrade breakage |
+| **Scoring & Reporting** | 10-area Risk Matrix, Readiness Score (0–100), Confidence Score |
 
-3.  (Optional) Install as a package:
-    ```bash
-    pip install -e .
-    ```
+---
 
-## Quick Start
+## 🏗️ Architecture
 
-```bash
-# Launch dashboard
-python -m ai_k8s_upgrader.cli serve --port 5000
-
-# CLI one-shot assessment (using generated sample)
-python -m ai_k8s_upgrader.cli assess --source 1.27 --target 1.30 --sample
-
-# Assess your own cluster from a snapshot
-python -m ai_k8s_upgrader.cli assess --source 1.27 --target 1.30 --snapshot cluster.json
+```
+CLI / Web Dashboard
+        │
+        ▼
+Assessment Engine (17-step pipeline)
+        │
+        ├── Cluster Collector  ──►  live kubectl  /  JSON snapshot
+        │
+        ├── K8s Database       ──►  API deprecation timelines
+        │                           behavioral changes per version
+        │                           operator compatibility matrix
+        │
+        ├── Scoring Matrix     ──►  Readiness Score (0–100)
+        │                           Confidence Score
+        │                           10-area Risk Matrix
+        │
+        └── Reporter           ──►  Markdown report
+                                    JSON report
+                                    Web Dashboard (Flask)
 ```
 
-## Usage
+---
 
-### Command Line Interface (CLI)
+## 🛠️ Tech Stack
 
-You can run the assessment in three modes:
+| Component | Technology |
+|---|---|
+| **Core Engine** | Python 3.x |
+| **Web Dashboard** | Flask (dark-themed, interactive) |
+| **CLI** | `k8s-upgrade-assess` (argparse) |
+| **Cluster Integration** | `kubectl` (live mode) / JSON snapshots |
+| **Testing** | pytest (55+ unit tests) |
+| **Reporting** | Markdown + JSON |
 
-1.  **Sample Mode:** Uses a generated realistic sample cluster snapshot.
-    ```bash
-    k8s-upgrade-assess --source 1.27 --target 1.30 --sample
-    ```
+---
 
-2.  **Snapshot Mode:** Uses a JSON snapshot of your cluster.
-    ```bash
-    # Generate snapshot (example using kubectl)
-    kubectl get all,crds,nodes,storageclasses,webhookconfigurations,psp -A -o json > cluster.json
-    
-    # Run assessment
-    k8s-upgrade-assess --source 1.27 --target 1.30 --snapshot cluster.json
-    ```
+## ⚡ Quick Start
 
-3.  **Live Mode:** Connects to your live cluster via `kubectl`.
-    ```bash
-    k8s-upgrade-assess --source 1.27 --target 1.30 --live
-    ```
+### Installation
 
-Other useful CLI commands:
-
-*   **Generate a sample cluster snapshot:**
-    ```bash
-    k8s-upgrade-assess generate-sample --source 1.27 --target 1.30 --output my_sample.json
-    ```
-
-*   **Launch the Web Dashboard:**
-    ```bash
-    k8s-upgrade-assess serve --port 5000
-    ```
-
-### Web Dashboard
-
-1.  Start the dashboard server:
-    ```bash
-    k8s-upgrade-assess serve --port 5000
-    ```
-2.  Open your browser and navigate to `http://localhost:5000`.
-3.  Configure your assessment (Source Version, Target Version, and Mode).
-4.  Run the assessment and view the interactive results, Risk Matrix, and export options.
-
-## Testing
-
-The project includes a comprehensive suite of unit tests (55+ tests) covering all modules (Database, Collector, Engine, Scoring, and Reporter).
-
-Run the tests using `pytest`:
 ```bash
+git clone https://github.com/vishalmore90/AI-Kubernetes-Upgrader.git
+cd AI-Kubernetes-Upgrader
+pip install -r requirements.txt
+
+# Optional: install as a CLI tool
+pip install -e .
+```
+
+### Run Modes
+
+**Sample Mode** — uses a generated realistic cluster snapshot:
+```bash
+k8s-upgrade-assess --source 1.27 --target 1.30 --sample
+```
+
+**Snapshot Mode** — uses a JSON export of your cluster:
+```bash
+# Export your cluster state
+kubectl get all,crds,nodes,storageclasses,webhookconfigurations,psp -A -o json > cluster.json
+
+# Run assessment
+k8s-upgrade-assess --source 1.27 --target 1.30 --snapshot cluster.json
+```
+
+**Live Mode** — connects directly to your running cluster:
+```bash
+k8s-upgrade-assess --source 1.27 --target 1.30 --live
+```
+
+### Launch the Web Dashboard
+
+```bash
+k8s-upgrade-assess serve --port 5000
+```
+
+Open `http://localhost:5000` to visualise the Risk Matrix, score gauges, and full assessment results interactively.
+
+---
+
+## 📊 Sample Output
+
+```
+══════════════════════════════════════════════════════
+  KUBERNETES UPGRADE ASSESSMENT REPORT
+  1.27 → 1.30
+══════════════════════════════════════════════════════
+
+  Readiness Score   : 72 / 100
+  Confidence Score  : 88%
+  Verdict           : ⚠️  CONDITIONAL
+
+  Risk Matrix (10 areas):
+  ┌─────────────────────────────┬────────┐
+  │ API Deprecations            │ HIGH   │
+  │ Controller Compatibility    │ MEDIUM │
+  │ Admission Webhooks          │ LOW    │
+  │ Storage Provisioners        │ MEDIUM │
+  │ Security Policies           │ HIGH   │
+  │ Networking                  │ LOW    │
+  │ Runtime Compatibility       │ LOW    │
+  │ Node Resource Pressure      │ LOW    │
+  │ Workload Health             │ LOW    │
+  │ CRD Compatibility           │ LOW    │
+  └─────────────────────────────┴────────┘
+
+  Action Required Before Upgrade:
+  1. Migrate PodSecurityPolicy → Pod Security Admission
+  2. Update ingress-nginx to v1.9.0+
+  3. Replace in-tree AWS EBS provisioner with EBS CSI driver
+══════════════════════════════════════════════════════
+```
+
+---
+
+## 🧪 Testing
+
+The project includes **55+ unit tests** covering all modules:
+
+```bash
+# Run all tests
+pytest
+
+# Run a specific module
 python -m pytest tests/test_engine.py -v
 ```
 
-## Architecture
+Test coverage spans: Database, Cluster Collector, Assessment Engine, Scoring Matrix, and Reporter.
 
-*   **`k8s_database.py`**: Contains Kubernetes release history, API deprecation/removal timelines, behavioral changes, and a compatibility matrix for popular operators.
-*   **`cluster_collector.py`**: Responsible for ingesting cluster state either from a live cluster via `kubectl` or from a static JSON snapshot.
-*   **`assessment_engine.py`**: The core engine that executes the 17-step assessment process.
-*   **`scoring_matrix.py`**: Calculates the Readiness Score, Confidence Score, and builds the 10-area Risk Matrix based on the assessment results.
-*   **`reporter.py`**: Generates structured Markdown and JSON reports.
-*   **`web_dashboard.py`**: The Flask-based interactive web interface.
+---
 
-## License
+## 📁 Project Structure
 
-This project is licensed under the Apache 2.0 License.
+```
+AI-Kubernetes-Upgrader/
+├── ai_k8s_upgrader/
+│   ├── k8s_database.py        # K8s release history, API deprecation timelines
+│   ├── cluster_collector.py   # Ingests live cluster or JSON snapshot
+│   ├── assessment_engine.py   # 17-step assessment pipeline
+│   ├── scoring_matrix.py      # Readiness Score, Risk Matrix
+│   ├── reporter.py            # Markdown + JSON report generation
+│   ├── web_dashboard.py       # Flask interactive dashboard
+│   └── cli.py                 # CLI entry point
+├── tests/
+│   └── test_engine.py
+├── requirements.txt
+├── setup.py
+└── README.md
+```
+
+---
+
+## 📄 License
+
+Apache 2.0 — see [LICENSE](LICENSE) for details.
