@@ -15,8 +15,6 @@ Upgrading a Kubernetes cluster is risky. A single deprecated API, an incompatibl
 - ⚠️ **CONDITIONAL** — Proceed with specific remediations
 - ❌ **NOT RECOMMENDED** — High-risk issues must be resolved first
 
----
-
 ## ✨ Features
 
 | Assessment Area | What It Checks |
