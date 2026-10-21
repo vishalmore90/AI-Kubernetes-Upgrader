@@ -23,6 +23,18 @@ from ai_k8s_upgrader.scoring_matrix import ScoringEngine
 from ai_k8s_upgrader.reporter import generate_markdown_report, generate_json_report
 from ai_k8s_upgrader.sample_generator import save_sample_cluster, generate_sample_cluster
 
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
 try:
     from rich.console import Console
     from rich.table import Table
@@ -39,12 +51,19 @@ except ImportError:
 
 def _print(msg: str, style: str = ""):
     if RICH_AVAILABLE and console:
-        console.print(msg)
-    else:
-        # Strip rich markup
-        import re
-        clean = re.sub(r'\[/?[^\]]*\]', '', msg)
+        try:
+            console.print(msg)
+            return
+        except UnicodeEncodeError:
+            pass
+    # Strip rich markup and print safely
+    import re
+    clean = re.sub(r'\[/?[^\]]*\]', '', msg)
+    try:
         print(clean)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or 'utf-8'
+        print(clean.encode(encoding, errors='replace').decode(encoding))
 
 
 def _banner():
@@ -286,8 +305,8 @@ def generate_sample(source, target, output):
 
 
 @main.command()
-@click.option("--host", default="0.0.0.0", help="Host to bind dashboard")
-@click.option("--port", default=5000, help="Port for web dashboard")
+@click.option("--host", default=None, help="Host to bind dashboard (default: HOST env var or 0.0.0.0)")
+@click.option("--port", default=None, type=int, help="Port for web dashboard (default: PORT env var or 5000)")
 @click.option("--debug", is_flag=True, default=False, help="Enable Flask debug mode")
 def serve(host, port, debug):
     """Launch the interactive web dashboard."""

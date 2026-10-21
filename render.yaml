@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: ai-kubernetes-upgrader
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && pip install -e .
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 ai_k8s_upgrader.web_dashboard:app
+    envVars:
+      - key: ALLOW_LIVE_CLUSTER
+        value: "false"
+      - key: PYTHON_VERSION
+        value: "3.12.0"

@@ -177,14 +177,49 @@ AI-Kubernetes-Upgrader/
 │   ├── assessment_engine.py   # 17-step assessment pipeline
 │   ├── scoring_matrix.py      # Readiness Score, Risk Matrix
 │   ├── reporter.py            # Markdown + JSON report generation
-│   ├── web_dashboard.py       # Flask interactive dashboard
+│   ├── web_dashboard.py       # Flask interactive dashboard (Render-ready WSGI)
 │   └── cli.py                 # CLI entry point
 ├── tests/
-│   └── test_engine.py
+│   ├── test_engine.py         # Engine, database, and scoring tests
+│   └── test_web_dashboard.py  # Web dashboard, security, and validation tests
 ├── requirements.txt
 ├── setup.py
 └── README.md
 ```
+
+---
+
+## 🚀 Deploying to Render (Free Public Demo)
+
+The web dashboard is production-ready for deployment on Render's free tier as a Python Web Service.
+
+### Render Configuration
+
+| Setting | Value |
+|---|---|
+| **Environment** | `Python` (3.12 recommended) |
+| **Region** | Any (e.g., Oregon, Frankfurt) |
+| **Branch** | `main` |
+| **Build Command** | `pip install -r requirements.txt && pip install -e .` |
+| **Start Command** | `gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 ai_k8s_upgrader.web_dashboard:app` |
+
+### Environment Variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ALLOW_LIVE_CLUSTER` | `false` | Disables live `kubectl` access for public security. Sample mode and snapshot JSON uploads remain fully functional. |
+| `RATE_LIMIT_REQUESTS` | `30` | Maximum assessment requests per client IP per window. |
+| `RATE_LIMIT_WINDOW` | `60` | Rate limit window in seconds (default: 60s). |
+| `MAX_UPLOAD_SIZE` | `5242880` | Maximum upload size in bytes (5 MB). |
+
+### Public Demo Security Architecture
+
+- **No Cluster Credentials**: The demo operates in zero-credential mode. No kubeconfig or cluster secrets are embedded or required.
+- **Safe Sample Mode**: Evaluates realistic pre-computed cluster topologies without outbound cluster connections.
+- **Snapshot Validation**: Uploaded snapshots are validated for JSON integrity, schema structure, and size limits (5 MB max) before parsing.
+- **Leak-Free Resource Cleanup**: Temporary files are guaranteed to be unlinked even upon parsing failures; exported reports are streamed directly in-memory via `io.BytesIO`.
+- **Stack Trace Protection**: Public visitors receive clean, generic error messages. Diagnostic stack traces are logged server-side only.
+- **Rate Limiting**: Thread-safe in-memory sliding-window limiter prevents request floods on free tier compute instances.
 
 ---
 

@@ -12,12 +12,20 @@ Features:
 - Real-time assessment progress
 """
 
+import io
 import json
+import logging
 import os
+import re
 import tempfile
+import threading
+import time
+from collections import defaultdict, deque
 from datetime import datetime
+from typing import Any, Dict, Optional, Tuple
 
-from flask import Flask, render_template_string, request, jsonify, send_file, redirect, url_for
+from flask import Flask, render_template_string, request, jsonify, send_file
+from werkzeug.exceptions import RequestEntityTooLarge, HTTPException
 
 from ai_k8s_upgrader.assessment_engine import AssessmentEngine
 from ai_k8s_upgrader.cluster_collector import collect_cluster_state
@@ -25,13 +33,23 @@ from ai_k8s_upgrader.scoring_matrix import ScoringEngine
 from ai_k8s_upgrader.reporter import generate_markdown_report, generate_json_report
 from ai_k8s_upgrader.sample_generator import generate_sample_cluster
 
+logger = logging.getLogger(__name__)
+
+# Deployment & Security Configuration
+ALLOW_LIVE_CLUSTER_DEFAULT = os.environ.get("ALLOW_LIVE_CLUSTER", "false").lower() in ("true", "1", "yes")
+MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5 MB
+RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "30"))
+RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
+
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
+app.config.setdefault("ALLOW_LIVE_CLUSTER", ALLOW_LIVE_CLUSTER_DEFAULT)
 
 # ---------------------------------------------------------------------------
 # HTML Template
 # ---------------------------------------------------------------------------
 
-DASHBOARD_HTML = """
+DASHBOARD_HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -608,14 +626,19 @@ DASHBOARD_HTML = """
                     <div class="logo-subtitle">Upgrade Feasibility & Risk Assessment Engine</div>
                 </div>
             </div>
-            <span class="header-badge">v1.0.0 · Enterprise Edition</span>
+            <span class="header-badge">v1.0.0 · {% if allow_live_cluster %}Enterprise Edition{% else %}Public Demo Edition{% endif %}</span>
         </div>
     </header>
 
     <main class="main">
         <!-- Config Panel -->
         <div class="config-panel">
-            <div class="config-title">⚙️ Assessment Configuration</div>
+            <div class="config-title">
+                ⚙️ Assessment Configuration
+                {% if not allow_live_cluster %}
+                <span style="font-size:0.75rem; font-weight:500; background:rgba(6,182,212,0.12); color:var(--accent-cyan); border:1px solid rgba(6,182,212,0.3); padding:3px 10px; border-radius:12px; margin-left:8px;">Public Demo Mode</span>
+                {% endif %}
+            </div>
             <form id="assessmentForm" enctype="multipart/form-data">
                 <div class="config-grid">
                     <div class="form-group">
@@ -631,7 +654,11 @@ DASHBOARD_HTML = """
                         <select id="modeSelect" name="mode" onchange="toggleUploadArea()">
                             <option value="sample">📦 Use Sample Cluster</option>
                             <option value="snapshot">📁 Upload JSON Snapshot</option>
+                            {% if allow_live_cluster %}
                             <option value="live">🔌 Live Cluster (kubectl)</option>
+                            {% else %}
+                            <option value="live" disabled>🔌 Live Cluster (Disabled in Public Demo)</option>
+                            {% endif %}
                         </select>
                     </div>
                     <div>
@@ -644,7 +671,7 @@ DASHBOARD_HTML = """
                 <!-- Upload area (hidden by default) -->
                 <div id="uploadArea" class="upload-area" style="display:none;" onclick="document.getElementById('snapshotFile').click()">
                     <input type="file" id="snapshotFile" name="snapshot_file" accept=".json">
-                    <div>📂 Click to upload cluster snapshot JSON</div>
+                    <div>📂 Click to upload cluster snapshot JSON (max 5 MB)</div>
                     <div style="font-size:0.75rem; color: var(--text-muted); margin-top:4px;">or drag and drop</div>
                 </div>
             </form>
@@ -828,10 +855,21 @@ DASHBOARD_HTML = """
 
             try {
                 const resp = await fetch('/api/assess', { method: 'POST', body: formData });
-                const data = await resp.json();
+                let data = null;
+                try {
+                    data = await resp.json();
+                } catch (parseErr) {
+                    if (resp.status === 413) {
+                        data = { error: 'The uploaded file exceeds the maximum allowed size of 5 MB.' };
+                    } else if (resp.status === 429) {
+                        data = { error: 'Rate limit exceeded. Please wait a moment before running another assessment.' };
+                    } else {
+                        data = { error: `Server error (${resp.status} ${resp.statusText})` };
+                    }
+                }
 
-                if (!resp.ok || data.error) {
-                    formError.innerHTML = `<div class="alert alert-error">❌ ${data.error || 'Assessment failed.'}</div>`;
+                if (!resp.ok || !data || data.error) {
+                    formError.innerHTML = `<div class="alert alert-error">❌ ${(data && data.error) || 'Assessment failed.'}</div>`;
                     return;
                 }
 
@@ -1031,56 +1069,270 @@ DASHBOARD_HTML = """
 
 
 # ---------------------------------------------------------------------------
+# Rate Limiting & Input Validation
+# ---------------------------------------------------------------------------
+
+class InMemoryRateLimiter:
+    """Thread-safe sliding-window rate limiter by client IP."""
+
+    def __init__(self, max_requests: int = 30, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.history = defaultdict(deque)
+        self.lock = threading.Lock()
+
+    def is_allowed(self, client_id: str) -> Tuple[bool, int]:
+        now = time.time()
+        cutoff = now - self.window_seconds
+        with self.lock:
+            q = self.history[client_id]
+            while q and q[0] < cutoff:
+                q.popleft()
+
+            if len(q) >= self.max_requests:
+                retry_after = int(self.window_seconds - (now - q[0])) + 1
+                return False, max(1, retry_after)
+
+            q.append(now)
+            # Periodic cleanup to prevent memory bloat
+            if len(self.history) > 1000:
+                expired = [k for k, v in self.history.items() if not v or v[-1] < cutoff]
+                for k in expired:
+                    del self.history[k]
+            return True, 0
+
+    def reset(self):
+        with self.lock:
+            self.history.clear()
+
+
+rate_limiter = InMemoryRateLimiter(max_requests=RATE_LIMIT_REQUESTS, window_seconds=RATE_LIMIT_WINDOW)
+
+VERSION_PATTERN = re.compile(r"^v?([1-9]\d*)\.([0-9]\d*)(?:\.([0-9]\d*))?$")
+
+
+def validate_k8s_version(version_str: str, label: str = "version") -> Tuple[bool, Optional[str], Optional[Tuple[int, int]]]:
+    """Validate Kubernetes version format and supported range."""
+    if not version_str or not isinstance(version_str, str):
+        return False, f"Missing or invalid {label}. Please provide a valid version string (e.g. 1.27).", None
+
+    v_clean = version_str.strip()
+    match = VERSION_PATTERN.match(v_clean)
+    if not match:
+        return False, f"Invalid {label} format: '{version_str}'. Expected format like '1.27' or 'v1.30'.", None
+
+    major = int(match.group(1))
+    minor = int(match.group(2))
+    if major != 1 or minor < 15 or minor > 40:
+        return False, f"Unsupported {label} '1.{minor}'. Supported range is K8s 1.15 to 1.40.", None
+
+    return True, None, (major, minor)
+
+
+def validate_version_pair(source_str: str, target_str: str) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
+    """Validate source and target versions and ensure target > source."""
+    s_ok, s_err, s_tuple = validate_k8s_version(source_str, "source version")
+    if not s_ok:
+        return False, s_err, None, None
+
+    t_ok, t_err, t_tuple = validate_k8s_version(target_str, "target version")
+    if not t_ok:
+        return False, t_err, None, None
+
+    if s_tuple >= t_tuple:
+        return (
+            False,
+            f"Target version ({target_str.strip()}) must be higher than source version ({source_str.strip()}) for upgrade assessment.",
+            None,
+            None,
+        )
+
+    clean_source = source_str.strip().lstrip("v")
+    clean_target = target_str.strip().lstrip("v")
+    return True, None, clean_source, clean_target
+
+
+def validate_snapshot_data(data: Any) -> Tuple[bool, Optional[str]]:
+    """Validate parsed JSON content for cluster snapshot."""
+    if not isinstance(data, dict):
+        return False, "Invalid snapshot: root element must be a JSON object (dictionary)."
+
+    recognized_keys = {
+        "nodes", "deployments", "statefulsets", "daemonsets", "crds",
+        "validating_webhooks", "mutating_webhooks", "storage_classes",
+        "persistent_volumes", "persistent_volume_claims", "network_policies",
+        "namespaces", "k8s_version"
+    }
+    found_keys = set(data.keys()).intersection(recognized_keys)
+    if not found_keys:
+        return False, "Invalid snapshot: file does not contain recognized Kubernetes cluster snapshot data."
+
+    list_keys = [
+        "nodes", "deployments", "statefulsets", "daemonsets", "jobs", "cronjobs",
+        "crds", "validating_webhooks", "mutating_webhooks", "storage_classes",
+        "persistent_volumes", "persistent_volume_claims", "network_policies",
+        "namespaces"
+    ]
+    for key in list_keys:
+        if key in data and not isinstance(data[key], list):
+            return False, f"Invalid snapshot structure: field '{key}' must be a list."
+
+    dict_item_lists = ["nodes", "deployments", "statefulsets", "daemonsets", "crds", "storage_classes"]
+    for key in dict_item_lists:
+        if key in data:
+            for i, item in enumerate(data[key]):
+                if not isinstance(item, dict):
+                    return False, f"Invalid snapshot structure: item #{i + 1} in '{key}' must be a JSON object."
+
+    return True, None
+
+
+# ---------------------------------------------------------------------------
+# Error Handlers
+# ---------------------------------------------------------------------------
+
+@app.errorhandler(413)
+@app.errorhandler(RequestEntityTooLarge)
+def handle_request_entity_too_large(error):
+    """Handle files exceeding MAX_CONTENT_LENGTH."""
+    logger.warning("Upload rejected: payload exceeds maximum allowed size (5 MB)")
+    return jsonify({
+        "error": "The uploaded file exceeds the maximum allowed size of 5 MB."
+    }), 413
+
+
+@app.errorhandler(500)
+def handle_internal_server_error(error):
+    """Generic 500 error handler that does not leak stack traces."""
+    logger.exception("Internal server error: %s", error)
+    return jsonify({
+        "error": "An internal error occurred while processing the request. Please verify your inputs and try again."
+    }), 500
+
+
+# ---------------------------------------------------------------------------
 # Flask Routes
 # ---------------------------------------------------------------------------
 
 @app.route("/")
 def index():
-    return render_template_string(DASHBOARD_HTML)
+    allow_live = app.config.get("ALLOW_LIVE_CLUSTER", False)
+    return render_template_string(DASHBOARD_HTML, allow_live_cluster=allow_live)
 
 
 @app.route("/api/assess", methods=["POST"])
 def api_assess():
     """Run assessment and return JSON results."""
+    # Rate Limiting check
+    client_ip = (
+        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or request.remote_addr
+        or "unknown"
+    )
+    allowed, retry_after = rate_limiter.is_allowed(client_ip)
+    if not allowed:
+        logger.warning(f"Rate limit exceeded for client {client_ip}")
+        response = jsonify({
+            "error": "Rate limit exceeded. Please wait a moment before running another assessment."
+        })
+        response.status_code = 429
+        response.headers["Retry-After"] = str(retry_after)
+        return response
+
     try:
-        source = request.form.get("source_version", "1.27").strip().lstrip("v")
-        target = request.form.get("target_version", "1.30").strip().lstrip("v")
-        mode = request.form.get("mode", "sample")
+        source_raw = request.form.get("source_version", "1.27")
+        target_raw = request.form.get("target_version", "1.30")
+        mode = request.form.get("mode", "sample").strip().lower()
+
+        # Input Validation: Versions
+        v_ok, v_err, source, target = validate_version_pair(source_raw, target_raw)
+        if not v_ok:
+            return jsonify({"error": v_err}), 400
+
+        # Input Validation: Mode
+        if mode not in ("sample", "snapshot", "live"):
+            return jsonify({"error": f"Unknown mode: '{mode}'. Must be 'sample', 'snapshot', or 'live'."}), 400
+
+        # Public Demo Security: Enforce ALLOW_LIVE_CLUSTER
+        if mode == "live":
+            allow_live = app.config.get("ALLOW_LIVE_CLUSTER", False)
+            if not allow_live:
+                logger.warning(f"Blocked live cluster request from {client_ip}: ALLOW_LIVE_CLUSTER is disabled")
+                return jsonify({
+                    "error": "Live cluster mode is disabled in this public demo environment. Please use Sample Mode or upload a JSON Snapshot."
+                }), 403
 
         # Collect cluster state
         if mode == "sample":
             from ai_k8s_upgrader.cluster_collector import SnapshotClusterCollector
             cluster_data = generate_sample_cluster(source_version=source, target_version=target)
 
-            # Write temp file for snapshot collector
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-                json.dump(cluster_data, f)
-                tmp_path = f.name
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+                    json.dump(cluster_data, f)
+                    tmp_path = f.name
 
-            collector = SnapshotClusterCollector(tmp_path)
-            snapshot = collector.collect()
-            snapshot.source_mode = "sample"
-            os.unlink(tmp_path)
+                collector = SnapshotClusterCollector(tmp_path)
+                snapshot = collector.collect()
+                snapshot.source_mode = "sample"
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
 
         elif mode == "snapshot":
             file = request.files.get("snapshot_file")
-            if not file:
+            if not file or not file.filename:
                 return jsonify({"error": "No snapshot file uploaded."}), 400
 
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-                file.save(f.name)
-                tmp_path = f.name
+            filename = file.filename.lower()
+            if not filename.endswith(".json"):
+                return jsonify({"error": "Invalid file type. Only JSON (.json) snapshot files are supported."}), 400
 
-            from ai_k8s_upgrader.cluster_collector import SnapshotClusterCollector
-            collector = SnapshotClusterCollector(tmp_path)
-            snapshot = collector.collect()
-            os.unlink(tmp_path)
+            # Read and parse JSON content safely
+            try:
+                raw_bytes = file.read()
+                if not raw_bytes or len(raw_bytes.strip()) == 0:
+                    return jsonify({"error": "Uploaded snapshot file is empty."}), 400
+                data = json.loads(raw_bytes.decode("utf-8"))
+            except UnicodeDecodeError:
+                return jsonify({"error": "Failed to decode snapshot file. Ensure the file is UTF-8 encoded."}), 400
+            except json.JSONDecodeError as jde:
+                logger.info(f"JSON decode error in snapshot upload: {jde}")
+                return jsonify({"error": f"Invalid JSON format in snapshot file: {jde.msg}."}), 400
+
+            # Validate snapshot structure
+            is_valid_snap, snap_err = validate_snapshot_data(data)
+            if not is_valid_snap:
+                return jsonify({"error": snap_err}), 400
+
+            # Parse with collector and guarantee cleanup
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+                    json.dump(data, f)
+                    tmp_path = f.name
+
+                from ai_k8s_upgrader.cluster_collector import SnapshotClusterCollector
+                collector = SnapshotClusterCollector(tmp_path)
+                snapshot = collector.collect()
+            except (TypeError, KeyError, ValueError) as pe:
+                logger.warning(f"Snapshot structure parsing error: {pe}")
+                return jsonify({
+                    "error": "Failed to parse snapshot: content does not match the required Kubernetes cluster schema."
+                }), 400
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
 
         elif mode == "live":
             snapshot = collect_cluster_state(mode="live")
-
-        else:
-            return jsonify({"error": f"Unknown mode: {mode}"}), 400
 
         # Run assessment
         engine = AssessmentEngine(source, target, snapshot)
@@ -1157,57 +1409,77 @@ def api_assess():
                 "post_upgrade_validations": scoring.post_upgrade_validations,
                 "final_recommendation": scoring.final_recommendation,
             },
-            # Store for export
-            "_result": result,
-            "_scoring": scoring,
         }
 
-        # Store in app context for export
+        # Store in app config for export
         app.config["last_result"] = result
         app.config["last_scoring"] = scoring
 
-        # Remove non-serializable keys
-        del response["_result"]
-        del response["_scoring"]
-
         return jsonify(response)
 
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+        logger.exception("Unexpected error in api_assess: %s", e)
+        return jsonify({
+            "error": "An internal error occurred while processing the assessment. Please verify your inputs and try again."
+        }), 500
 
 
 @app.route("/api/export")
 def api_export():
-    """Export the last assessment as markdown or JSON."""
-    fmt = request.args.get("format", "markdown")
-    source = request.args.get("source", "unknown")
-    target = request.args.get("target", "unknown")
+    """Export the last assessment as markdown or JSON (in-memory streaming, no disk leaks)."""
+    fmt = request.args.get("format", "markdown").strip().lower()
+    raw_source = request.args.get("source", "unknown")
+    raw_target = request.args.get("target", "unknown")
+
+    # Sanitize version strings for safe file naming
+    safe_source = re.sub(r'[^a-zA-Z0-9._-]', '', raw_source)
+    safe_target = re.sub(r'[^a-zA-Z0-9._-]', '', raw_target)
 
     result = app.config.get("last_result")
     scoring = app.config.get("last_scoring")
 
     if not result or not scoring:
-        return "No assessment available to export. Run an assessment first.", 404
+        return jsonify({"error": "No assessment available to export. Run an assessment first."}), 404
 
-    if fmt == "markdown":
-        content = generate_markdown_report(result, scoring)
-        filename = f"k8s_upgrade_{source}_to_{target}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
-            f.write(content)
-            tmp_path = f.name
-        return send_file(tmp_path, as_attachment=True, download_name=filename, mimetype="text/markdown")
-    else:
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    if fmt == "json":
         content = generate_json_report(result, scoring)
-        filename = f"k8s_upgrade_{source}_to_{target}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
-            f.write(content)
-            tmp_path = f.name
-        return send_file(tmp_path, as_attachment=True, download_name=filename, mimetype="application/json")
+        filename = f"k8s_upgrade_{safe_source}_to_{safe_target}_{timestamp}.json"
+        return send_file(
+            io.BytesIO(content.encode("utf-8")),
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/json"
+        )
+    else:
+        content = generate_markdown_report(result, scoring)
+        filename = f"k8s_upgrade_{safe_source}_to_{safe_target}_{timestamp}.md"
+        return send_file(
+            io.BytesIO(content.encode("utf-8")),
+            as_attachment=True,
+            download_name=filename,
+            mimetype="text/markdown"
+        )
 
 
-def run_dashboard(host: str = "0.0.0.0", port: int = 5000, debug: bool = False):
-    """Start the web dashboard."""
-    print(f"\nAI-Kubernetes-Upgrader Dashboard running at http://localhost:{port}")
+def run_dashboard(host: Optional[str] = None, port: Optional[int] = None, debug: Optional[bool] = None):
+    """
+    Start the web dashboard.
+    Binds dynamically to host and port supplied by environment variables (e.g., Render $PORT).
+    """
+    if host is None:
+        host = os.environ.get("HOST", "0.0.0.0")
+    if port is None:
+        port = int(os.environ.get("PORT", 5000))
+    if debug is None:
+        debug = os.environ.get("FLASK_DEBUG", "0").lower() in ("true", "1", "yes")
+
+    print(f"\nAI-Kubernetes-Upgrader Dashboard running at http://{host}:{port}")
     print("Press Ctrl+C to stop.\n")
     app.run(host=host, port=port, debug=debug)
+
+
+if __name__ == "__main__":
+    run_dashboard()
