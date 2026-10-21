@@ -6,6 +6,10 @@ setup(
     description="Enterprise-grade Kubernetes Upgrade Feasibility, Compatibility, and Risk Assessment Engine",
     author="AI-Kubernetes-Upgrader",
     packages=find_packages(),
+    package_data={
+        "ai_k8s_upgrader": ["templates/*.html", "static/*"],
+    },
+    include_package_data=True,
     python_requires=">=3.9",
     install_requires=[
         "flask>=2.3.0",

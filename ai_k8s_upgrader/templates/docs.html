@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Documentation & Architecture | AI-Kubernetes-Upgrader{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Documentation & Architecture</h1>
+<p class="page-lead">A 17-step automated pipeline evaluating Kubernetes cluster upgrade safety before execution.</p>
+
+<div class="surface-card">
+    <h2 class="section-title">Assessment Methodology</h2>
+    <p class="section-lead">
+        Production Kubernetes upgrades frequently fail from unnoticed API deprecations, incompatible admission webhooks, or legacy storage provisioners. This engine analyzes every cluster subsystem against a curated release database.
+    </p>
+
+    <div class="grid-cards">
+        <div class="method-card">
+            <div class="method-card-title">1. API Lifecycle Verification</div>
+            <p class="method-card-desc">Scans active resources against scheduled removals across minor and intermediate versions.</p>
+        </div>
+        <div class="method-card">
+            <div class="method-card-title">2. Webhook & Controller Matrix</div>
+            <p class="method-card-desc">Evaluates validating and mutating webhook failure policies that could lock the control plane.</p>
+        </div>
+        <div class="method-card">
+            <div class="method-card-title">3. Storage & Runtime Plugins</div>
+            <p class="method-card-desc">Identifies deprecated in-tree storage provisioners and CRI runtime version requirements.</p>
+        </div>
+    </div>
+</div>
+
+<div class="surface-card" id="architecture">
+    <h2 class="section-title">Engine Architecture</h2>
+    <p class="section-lead">
+        The system isolates analysis from cluster mutation. It operates in read-only and offline modes to preserve infrastructure stability.
+    </p>
+
+    <pre class="code-block">
+CLI / Web Dashboard
+        │
+        ▼
+Assessment Engine (17-Step Pipeline)
+        │
+        ├── Cluster Collector     ──►  JSON Snapshot / Sample Data (Offline)
+        │
+        ├── Knowledge Database    ──►  Deprecation Timelines & Behavioral Matrix
+        │
+        ├── Scoring Engine        ──►  Readiness Score (0–100) & 10-Area Risk Matrix
+        │
+        └── Reporter              ──►  Markdown, JSON, & Interactive Dashboard
+    </pre>
+</div>
+
+<div class="surface-card">
+    <h2 class="section-title">Command-Line Interface</h2>
+    <p class="section-lead">
+        Run assessments directly in CI/CD pipelines or local workstations with zero external services required.
+    </p>
+
+    <pre class="code-block">
+# Run offline sample assessment
+k8s-upgrade-assess assess --source 1.27 --target 1.30 --sample
+
+# Assess from an exported cluster JSON snapshot
+k8s-upgrade-assess assess --source 1.27 --target 1.30 --snapshot cluster.json
+
+# Launch local web interface
+k8s-upgrade-assess serve --port 5000
+    </pre>
+</div>
+{% endblock %}

@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}AI-Kubernetes-Upgrader | Upgrade Assessment Engine{% endblock %}</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <!-- Header with 5 Links Total -->
+    <header class="site-header">
+        <div class="header-container">
+            <a href="/" class="brand-link">
+                <svg class="brand-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                    <polyline points="2 17 12 22 22 17"></polyline>
+                    <polyline points="2 12 12 17 22 12"></polyline>
+                </svg>
+                <span class="brand-text">AI-Kubernetes-Upgrader</span>
+            </a>
+
+            <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Toggle navigation menu">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <line x1="3" y1="12" x2="21" y2="12"></line>
+                    <line x1="3" y1="6" x2="21" y2="6"></line>
+                    <line x1="3" y1="18" x2="21" y2="18"></line>
+                </svg>
+            </button>
+
+            <!-- Exactly 5 Links in Navigation -->
+            <nav>
+                <ul class="nav-links" id="navLinks">
+                    <li><a href="/" class="nav-link {% if active_nav == 'assess' %}active{% endif %}">Assess</a></li>
+                    <li><a href="/docs" class="nav-link {% if active_nav == 'docs' %}active{% endif %}">Documentation</a></li>
+                    <li><a href="/docs#architecture" class="nav-link">Architecture</a></li>
+                    <li><a href="/privacy" class="nav-link {% if active_nav == 'privacy' %}active{% endif %}">Privacy</a></li>
+                    <li><a href="/terms" class="nav-link {% if active_nav == 'terms' %}active{% endif %}">Terms</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="page-container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="site-footer">
+        <div class="footer-container">
+            <div class="footer-text">
+                &copy; {{ now_year|default('2026') }} AI-Kubernetes-Upgrader. Open-source enterprise Kubernetes release verification.
+            </div>
+            <ul class="footer-nav">
+                <li><a href="/docs">Docs</a></li>
+                <li><a href="/privacy">Privacy Policy</a></li>
+                <li><a href="/terms">Terms of Service</a></li>
+                <li><a href="https://github.com/vishalmore90/AI-Kubernetes-Upgrader" target="_blank" rel="noopener noreferrer">GitHub</a></li>
+            </ul>
+        </div>
+    </footer>
+
+    <script>
+        const menuBtn = document.getElementById('mobileMenuBtn');
+        const navLinks = document.getElementById('navLinks');
+        if (menuBtn && navLinks) {
+            menuBtn.addEventListener('click', () => {
+                navLinks.classList.toggle('active');
+            });
+        }
+    </script>
+    {% block extra_scripts %}{% endblock %}
+</body>
+</html>

@@ -361,6 +361,70 @@ class TestWebDashboard(unittest.TestCase):
         self.assertIn("meta", exported_data)
         self.assertIn("executive_summary", exported_data)
 
+    # -----------------------------------------------------------------------
+    # Security Headers & Multi-Page Routes
+    # -----------------------------------------------------------------------
+    def test_security_headers_present(self):
+        """Responses must include modern security headers (CSP, nosniff, DENY)."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Content-Security-Policy", response.headers)
+        self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
+        self.assertEqual(response.headers.get("Referrer-Policy"), "strict-origin-when-cross-origin")
+        self.assertIn("Permissions-Policy", response.headers)
+
+    def test_docs_page(self):
+        """GET /docs should render documentation and architecture."""
+        response = self.client.get("/docs")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+        self.assertIn("Documentation & Architecture", html)
+        self.assertIn("Assessment Methodology", html)
+
+    def test_privacy_page(self):
+        """GET /privacy should render Privacy Policy."""
+        response = self.client.get("/privacy")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+        self.assertIn("Privacy Policy", html)
+        self.assertIn("Zero Credential Collection", html)
+
+    def test_terms_page(self):
+        """GET /terms should render Terms of Service."""
+        response = self.client.get("/terms")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+        self.assertIn("Terms of Service", html)
+        self.assertIn("Disclaimer of Warranty", html)
+
+    def test_favicon_route(self):
+        """GET /favicon.svg and /favicon.ico should return vector SVG favicon."""
+        svg_resp = self.client.get("/favicon.svg")
+        self.assertEqual(svg_resp.status_code, 200)
+        self.assertIn("image/svg+xml", svg_resp.content_type)
+
+        ico_resp = self.client.get("/favicon.ico")
+        self.assertEqual(ico_resp.status_code, 200)
+        self.assertIn("image/svg+xml", ico_resp.content_type)
+
+    def test_admin_route_unauthorized_by_default(self):
+        """Admin portal must reject unauthenticated requests with 401."""
+        response = self.client.get("/admin")
+        self.assertEqual(response.status_code, 401)
+        data = response.get_json()
+        self.assertIn("error", data)
+        self.assertIn("administrative access is restricted", data["error"])
+
+    def test_admin_route_authorized_with_token(self):
+        """Admin portal must grant access when valid ADMIN_SECRET bearer token is supplied."""
+        with patch.dict(os.environ, {"ADMIN_SECRET": "test-super-secret-token-123"}):
+            headers = {"Authorization": "Bearer test-super-secret-token-123"}
+            response = self.client.get("/admin", headers=headers)
+            self.assertEqual(response.status_code, 200)
+            data = response.get_json()
+            self.assertEqual(data.get("status"), "authenticated")
+
 
 if __name__ == "__main__":
     unittest.main()

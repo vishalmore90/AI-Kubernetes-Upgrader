@@ -1,0 +1,429 @@
+{% extends "base.html" %}
+
+{% block title %}AI-Kubernetes-Upgrader | Upgrade Assessment Dashboard{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Kubernetes Upgrade Assessment Engine</h1>
+<p class="page-lead">Verify cluster readiness, evaluate API removals, and calculate upgrade risk prior to upgrading production workloads.</p>
+
+<!-- Assessment Configuration -->
+<div class="config-card">
+    <div class="config-header">
+        <div class="config-title">
+            <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+            Assessment Configuration
+        </div>
+        {% if not allow_live_cluster %}
+        <span class="demo-badge">Public Demo Mode</span>
+        {% endif %}
+    </div>
+
+    <form id="assessmentForm" enctype="multipart/form-data">
+        <div class="form-grid">
+            <div class="form-field">
+                <label class="form-label" for="sourceVersion">Source Version</label>
+                <input type="text" id="sourceVersion" name="source_version" class="form-input" value="1.27" placeholder="e.g. 1.27" required>
+            </div>
+
+            <div class="form-field">
+                <label class="form-label" for="targetVersion">Target Version</label>
+                <input type="text" id="targetVersion" name="target_version" class="form-input" value="1.30" placeholder="e.g. 1.30" required>
+            </div>
+
+            <div class="form-field">
+                <label class="form-label" for="modeSelect">Cluster Source</label>
+                <select id="modeSelect" name="mode" class="form-select" onchange="toggleUploadZone()">
+                    <option value="sample">Sample Cluster State</option>
+                    <option value="snapshot">Upload JSON Snapshot</option>
+                    {% if allow_live_cluster %}
+                    <option value="live">Live Cluster (kubectl)</option>
+                    {% else %}
+                    <option value="live" disabled>Live Cluster (Disabled in Public Demo)</option>
+                    {% endif %}
+                </select>
+            </div>
+
+            <div>
+                <button type="submit" class="btn-action" id="submitBtn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
+                    <span>Run Assessment</span>
+                </button>
+            </div>
+        </div>
+
+        <div id="uploadZone" class="upload-zone upload-zone-hidden" onclick="document.getElementById('snapshotFileInput').click()">
+            <input type="file" id="snapshotFileInput" class="file-input-hidden" name="snapshot_file" accept=".json">
+            <svg class="upload-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            <div class="upload-text" id="uploadFilename">Click to select cluster snapshot JSON (maximum 5 MB)</div>
+            <div class="upload-hint">Files are processed in-memory and automatically deleted after execution.</div>
+        </div>
+    </form>
+
+    <div class="spinner-wrap" id="loadingSpinner">
+        <div class="spinner-circle"></div>
+        <span>Executing 17-step assessment engine...</span>
+    </div>
+
+    <div id="errorMessageContainer"></div>
+</div>
+
+<!-- Results Section -->
+<div class="results-container" id="resultsSection">
+    <div class="dashboard-grid">
+        <!-- Left Column: Metrics -->
+        <div>
+            <div class="metric-card">
+                <div class="metric-label">Upgrade Verdict</div>
+                <div class="decision-badge" id="decisionBadge"></div>
+                <div class="metric-subtext" id="versionSpan"></div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-label">Readiness Score</div>
+                <div class="metric-number" id="readinessScore">--</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="readinessFill"></div>
+                </div>
+                <div class="metric-subtext" id="readinessLabel"></div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-label">Confidence Score</div>
+                <div class="metric-number metric-confidence" id="confidenceScore">--</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="confidenceFill"></div>
+                </div>
+                <div class="metric-hint">Data completeness rating</div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-label metric-label-spaced">Summary Counts</div>
+                <div id="summaryCounts" class="metric-counts"></div>
+            </div>
+        </div>
+
+        <!-- Right Column: Risk Matrix & Findings -->
+        <div>
+            <div class="table-container">
+                <div class="table-header">
+                    <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="20" x2="18" y2="10"></line>
+                        <line x1="12" y1="20" x2="12" y2="4"></line>
+                        <line x1="6" y1="20" x2="6" y2="14"></line>
+                    </svg>
+                    Risk Matrix (10 Core Subsystems)
+                </div>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Subsystem</th>
+                            <th>Status</th>
+                            <th>Severity</th>
+                            <th>Findings Summary</th>
+                        </tr>
+                    </thead>
+                    <tbody id="riskMatrixBody"></tbody>
+                </table>
+            </div>
+
+            <!-- Expandable Panels -->
+            <div class="accordion-panel">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title">
+                        <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                            <line x1="12" y1="9" x2="12" y2="13"></line>
+                            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                        </svg>
+                        Critical Issues & High Risks
+                    </div>
+                    <span class="icon-arrow">&darr;</span>
+                </div>
+                <div class="accordion-body open" id="criticalIssuesBody"></div>
+            </div>
+
+            <div class="accordion-panel">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title">
+                        <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                            <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                            <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                        </svg>
+                        API Removal & Deprecation Timeline
+                    </div>
+                    <span class="icon-arrow">&darr;</span>
+                </div>
+                <div class="accordion-body" id="apiRemovalBody"></div>
+            </div>
+
+            <div class="accordion-panel">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title">
+                        <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="9 11 12 14 22 4"></polyline>
+                            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                        </svg>
+                        Required Pre-Upgrade Remediation Actions
+                    </div>
+                    <span class="icon-arrow">&darr;</span>
+                </div>
+                <div class="accordion-body" id="requiredActionsBody"></div>
+            </div>
+
+            <div class="accordion-panel">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title">
+                        <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="8" y1="6" x2="21" y2="6"></line>
+                            <line x1="8" y1="12" x2="21" y2="12"></line>
+                            <line x1="8" y1="18" x2="21" y2="18"></line>
+                            <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                            <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                            <line x1="3" y1="18" x2="3.01" y2="18"></line>
+                        </svg>
+                        Sequential Upgrade Execution Order
+                    </div>
+                    <span class="icon-arrow">&darr;</span>
+                </div>
+                <div class="accordion-body" id="upgradeOrderBody"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export Section -->
+    <div class="export-card">
+        <div>
+            <div class="export-title">Export Full Assessment Report</div>
+            <div class="export-desc">Download comprehensive Markdown or JSON reports for audit trails and RFC approval.</div>
+        </div>
+        <div class="export-actions">
+            <button type="button" class="btn-action" onclick="downloadReport('markdown')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span>Export Markdown</span>
+            </button>
+            <button type="button" class="btn-action" onclick="downloadReport('json')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span>Export JSON</span>
+            </button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    let activeReport = null;
+
+    function toggleUploadZone() {
+        const mode = document.getElementById('modeSelect').value;
+        const uploadZone = document.getElementById('uploadZone');
+        if (mode === 'snapshot') {
+            uploadZone.classList.remove('upload-zone-hidden');
+        } else {
+            uploadZone.classList.add('upload-zone-hidden');
+        }
+    }
+
+    function toggleAccordion(header) {
+        const body = header.nextElementSibling;
+        body.classList.toggle('open');
+    }
+
+    const fileInput = document.getElementById('snapshotFileInput');
+    const uploadFilename = document.getElementById('uploadFilename');
+    if (fileInput) {
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                uploadFilename.textContent = `Selected: ${e.target.files[0].name}`;
+            }
+        });
+    }
+
+    document.getElementById('assessmentForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = document.getElementById('assessmentForm');
+        const spinner = document.getElementById('loadingSpinner');
+        const resultsSection = document.getElementById('resultsSection');
+        const errorContainer = document.getElementById('errorMessageContainer');
+
+        spinner.classList.add('active');
+        resultsSection.classList.remove('active');
+        errorContainer.innerHTML = '';
+
+        const formData = new FormData(form);
+
+        try {
+            const resp = await fetch('/api/assess', { method: 'POST', body: formData });
+            let data = null;
+            try {
+                data = await resp.json();
+            } catch (err) {
+                if (resp.status === 413) {
+                    data = { error: 'Uploaded file exceeds the maximum allowed limit of 5 MB.' };
+                } else if (resp.status === 429) {
+                    data = { error: 'Rate limit exceeded. Please wait a moment before trying again.' };
+                } else {
+                    data = { error: `Server error (${resp.status})` };
+                }
+            }
+
+            if (!resp.ok || !data || data.error) {
+                errorContainer.innerHTML = `<div class="alert-box alert-error">${data && data.error ? data.error : 'Assessment processing failed.'}</div>`;
+                return;
+            }
+
+            activeReport = data;
+            renderDashboard(data);
+            resultsSection.classList.add('active');
+            resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+        } catch (netErr) {
+            errorContainer.innerHTML = `<div class="alert-box alert-error">${netErr.message}</div>`;
+        } finally {
+            spinner.classList.remove('active');
+        }
+    });
+
+    function getDecisionClass(decision) {
+        if (decision === 'APPROVED') return 'decision-approved';
+        if (decision === 'CONDITIONAL') return 'decision-conditional';
+        return 'decision-not-recommended';
+    }
+
+    function getStatusClass(status) {
+        const map = {
+            'PASS': 'status-pass',
+            'GOOD': 'status-good',
+            'WARNING': 'status-warning',
+            'HIGH RISK': 'status-high',
+            'CRITICAL': 'status-critical'
+        };
+        return map[status] || 'status-warning';
+    }
+
+    function renderDashboard(data) {
+        const assessment = data.assessment;
+        const scoring = data.scoring;
+
+        // Verdict
+        const decisionBadge = document.getElementById('decisionBadge');
+        decisionBadge.textContent = scoring.upgrade_decision;
+        decisionBadge.className = `decision-badge ${getDecisionClass(scoring.upgrade_decision)}`;
+        document.getElementById('versionSpan').textContent = `v${assessment.source_version} to v${assessment.target_version}`;
+
+        // Readiness Score
+        const readiness = scoring.readiness_score;
+        document.getElementById('readinessScore').textContent = `${readiness}/100`;
+        document.getElementById('readinessFill').style.width = `${readiness}%`;
+        document.getElementById('readinessLabel').textContent = scoring.readiness_label;
+
+        // Confidence Score
+        const confidence = scoring.confidence_score;
+        document.getElementById('confidenceScore').textContent = `${confidence}%`;
+        document.getElementById('confidenceFill').style.width = `${confidence}%`;
+
+        // Summary counts
+        document.getElementById('summaryCounts').innerHTML = `
+            <div>Critical Blockers: <strong>${scoring.critical_issues.length}</strong></div>
+            <div>High Risk Factors: <strong>${scoring.high_risks.length}</strong></div>
+            <div>Warnings: <strong>${scoring.warnings.length}</strong></div>
+            <div>Removed APIs Detected: <strong>${assessment.api_removals.length}</strong></div>
+            <div>Required Remediations: <strong>${scoring.required_actions_before.length}</strong></div>
+        `;
+
+        // Risk Matrix
+        const matrixRows = assessment.risk_matrix.map(row => `
+            <tr>
+                <td class="font-semibold">${escapeHtml(row.area)}</td>
+                <td><span class="status-badge ${getStatusClass(row.status)}">${escapeHtml(row.status)}</span></td>
+                <td><span class="matrix-severity">${escapeHtml(row.severity)}</span></td>
+                <td class="matrix-explanation">${escapeHtml(row.explanation)}</td>
+            </tr>
+        `).join('');
+        document.getElementById('riskMatrixBody').innerHTML = matrixRows;
+
+        // Critical Issues
+        const issues = [...scoring.critical_issues, ...scoring.high_risks];
+        if (issues.length > 0) {
+            document.getElementById('criticalIssuesBody').innerHTML = issues.map(item => `
+                <div class="list-item">
+                    <span class="item-bullet">[!]</span>
+                    <div>${escapeHtml(item)}</div>
+                </div>
+            `).join('');
+        } else {
+            document.getElementById('criticalIssuesBody').innerHTML = `<div class="empty-state-pass">No critical blockers or high risks detected for this version range.</div>`;
+        }
+
+        // API Removals
+        if (assessment.api_removals.length > 0) {
+            document.getElementById('apiRemovalBody').innerHTML = assessment.api_removals.map(api => `
+                <div class="list-item">
+                    <span class="item-bullet">&bull;</span>
+                    <div>
+                        <strong>${escapeHtml(api.kind)}</strong> using <code>${escapeHtml(api.current_api)}</code>
+                        <div class="list-item-meta">
+                            Removed in K8s ${escapeHtml(api.removal_version)} - Replacement: ${escapeHtml(api.replacement_api)}
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        } else {
+            document.getElementById('apiRemovalBody').innerHTML = `<div class="empty-state-neutral">No removed APIs actively detected in this cluster snapshot.</div>`;
+        }
+
+        // Required Actions
+        if (scoring.required_actions_before.length > 0) {
+            document.getElementById('requiredActionsBody').innerHTML = scoring.required_actions_before.map((act, idx) => `
+                <div class="list-item">
+                    <span class="item-bullet">${idx + 1}.</span>
+                    <div>${escapeHtml(act.replace(/^\\d+\\.?\\s*/, ''))}</div>
+                </div>
+            `).join('');
+        } else {
+            document.getElementById('requiredActionsBody').innerHTML = `<div class="empty-state-neutral">No pre-upgrade remediation actions required.</div>`;
+        }
+
+        // Upgrade Order
+        document.getElementById('upgradeOrderBody').innerHTML = scoring.recommended_upgrade_order.map((step, idx) => `
+            <div class="list-item">
+                <span class="item-bullet">${idx + 1}.</span>
+                <div>${escapeHtml(step)}</div>
+            </div>
+        `).join('');
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function downloadReport(format) {
+        if (!activeReport) return;
+        const src = encodeURIComponent(document.getElementById('sourceVersion').value.trim());
+        const tgt = encodeURIComponent(document.getElementById('targetVersion').value.trim());
+        window.open(`/api/export?format=${format}&source=${src}&target=${tgt}`, '_blank');
+    }
+</script>
+{% endblock %}

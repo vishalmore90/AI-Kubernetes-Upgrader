@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}Privacy Policy | AI-Kubernetes-Upgrader{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Privacy Policy</h1>
+<p class="page-lead">Our privacy commitments for infrastructure assessments and cluster snapshot processing.</p>
+
+<div class="surface-card">
+    <h2 class="section-title">1. Zero Credential Collection</h2>
+    <p class="section-lead">
+        AI-Kubernetes-Upgrader does not request, collect, or store Kubernetes credentials, kubeconfig secrets, cloud access tokens, or private certificates. In public demo mode, all outbound cluster communication is disabled by default.
+    </p>
+
+    <h2 class="section-title">2. In-Memory Snapshot Processing</h2>
+    <p class="section-lead">
+        Cluster snapshots uploaded for analysis are processed strictly in ephemeral server memory. Any temporary files created during JSON deserialization are unlinked and destroyed immediately upon analysis completion or failure.
+    </p>
+
+    <h2 class="section-title">3. No Tracking or User Profiling</h2>
+    <p class="section-lead">
+        We do not use tracking cookies, commercial analytics scripts, or third-party behavioral profiling. Client IP addresses are utilized exclusively in volatile memory for rate-limiting protection against service abuse.
+    </p>
+
+    <h2 class="section-title">4. Data Retention</h2>
+    <p class="section-lead">
+        No cluster assessment data is persisted to a database or disk storage. When an assessment session ends or the server instance spins down, all in-memory evaluation records are wiped.
+    </p>
+
+    <div class="effective-date">
+        Effective Date: October 2026. For questions or security inquiries, visit the project repository on GitHub.
+    </div>
+</div>
+{% endblock %}
