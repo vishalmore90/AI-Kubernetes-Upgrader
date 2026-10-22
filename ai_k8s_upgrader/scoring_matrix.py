@@ -8,7 +8,7 @@ per the specification.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 from ai_k8s_upgrader.assessment_engine import (
     AssessmentResult, Status, Severity, IssueCategory
@@ -88,9 +88,6 @@ class ScoringEngine:
         # Calculate Confidence Score
         scoring.confidence_score, scoring.confidence_factors = self._calculate_confidence()
 
-        # Determine Upgrade Decision
-        scoring.upgrade_decision = self._determine_decision(scoring.readiness_score)
-
         # Generate Executive Summary components
         scoring.critical_issues = self._collect_critical_issues()
         scoring.high_risks = self._collect_high_risks()
@@ -98,6 +95,9 @@ class ScoringEngine:
         scoring.required_actions_before = self._generate_required_actions()
         scoring.recommended_upgrade_order = self._generate_upgrade_order()
         scoring.post_upgrade_validations = self._generate_post_upgrade_validations()
+
+        # Determine Upgrade Decision
+        scoring.upgrade_decision = self._determine_decision(scoring.readiness_score, scoring.critical_issues)
         scoring.final_recommendation = self._generate_final_recommendation(scoring)
 
         return scoring
@@ -285,36 +285,30 @@ class ScoringEngine:
 
     def _calculate_readiness(self, matrix: List[RiskMatrixEntry]) -> Tuple[int, str]:
         """
-        Calculate readiness score (0-100) from risk matrix.
-        Base: 100, deduct points per status severity.
+        Calculate readiness score (0-100) deterministically from the 10-area risk matrix.
+        Base: 100.
+        Deductions per area status:
+          - CRITICAL: -30 per area
+          - HIGH_RISK: -15 per area
+          - WARNING: -5 per area
+          - GOOD / PASS: 0
         """
         score = 100
         for entry in matrix:
-            deduction = STATUS_WEIGHTS.get(entry.status, 0)
-            score -= deduction
-
-        # Additional deductions for incompatibility reports
-        critical_incompat = [r for r in self.result.incompatibility_reports
-                             if r.severity == Severity.CRITICAL]
-        high_incompat = [r for r in self.result.incompatibility_reports
-                        if r.severity == Severity.HIGH]
-
-        score -= len(critical_incompat) * 15
-        score -= len(high_incompat) * 5
-
-        # PSP removal is a hard -30 if detected
-        if self.result.snapshot.pod_security_policies and hasattr(self.result.snapshot, 'k8s_version'):
-            from ai_k8s_upgrader.k8s_database import version_gte
-            if version_gte(self.result.target_version, "1.25"):
+            if entry.status == Status.CRITICAL:
                 score -= 30
+            elif entry.status == Status.HIGH_RISK:
+                score -= 15
+            elif entry.status == Status.WARNING:
+                score -= 5
 
         score = max(0, min(100, score))
 
         if score >= 90:
             label = "Ready"
-        elif score >= 75:
+        elif score >= 70:
             label = "Ready with remediation"
-        elif score >= 50:
+        elif score >= 40:
             label = "Significant risk"
         else:
             label = "Not recommended"
@@ -322,11 +316,11 @@ class ScoringEngine:
         return score, label
 
     def _calculate_confidence(self) -> Tuple[int, List[str]]:
-        """Calculate confidence score based on available evidence."""
+        """Calculate confidence score based on available evidence and collection completeness."""
         score = 100
         factors = []
 
-        # Snapshot mode penalty
+        # Snapshot / sample mode
         if self.result.snapshot.source_mode == "snapshot":
             score -= 5
             factors.append("-5: Analysis based on cluster snapshot (not live cluster)")
@@ -334,24 +328,28 @@ class ScoringEngine:
             score -= 20
             factors.append("-20: Analysis based on generated sample data (not real cluster)")
 
-        # Collection errors
-        if self.result.snapshot.collection_errors:
-            penalty = min(20, len(self.result.snapshot.collection_errors) * 5)
+        # Data completeness / Inventory status
+        inv_status = getattr(self.result, "inventory_status", "AVAILABLE")
+        if inv_status == "COLLECTION_ERRORS" or self.result.snapshot.collection_errors:
+            err_count = len(self.result.snapshot.collection_errors)
+            penalty = min(20, max(10, err_count * 5))
             score -= penalty
-            factors.append(f"-{penalty}: {len(self.result.snapshot.collection_errors)} data collection error(s)")
+            factors.append(f"-{penalty}: {err_count} data collection error(s) occurred")
+        elif inv_status == "MISSING":
+            score -= 15
+            factors.append("-15: Cluster resource inventory was not provided; cannot fully verify API usage")
+        elif inv_status == "VERIFIED_EMPTY":
+            factors.append("+: Cluster inventory verified empty (clean of deprecated manifests)")
 
         # No workloads detected
         total_workloads = (len(self.result.snapshot.deployments) +
                            len(self.result.snapshot.statefulsets) +
-                           len(self.result.snapshot.daemonsets))
-        if total_workloads == 0:
+                           len(self.result.snapshot.daemonsets) +
+                           len(self.result.snapshot.jobs) +
+                           len(self.result.snapshot.cronjobs))
+        if total_workloads == 0 and inv_status != "VERIFIED_EMPTY":
             score -= 10
-            factors.append("-10: No workloads detected (may be incomplete collection)")
-
-        # No controllers detected
-        if not self.result.detected_controllers:
-            score -= 10
-            factors.append("-10: No controllers detected (may have unverified operators)")
+            factors.append("-10: No workloads detected in cluster snapshot")
 
         # Unknown controllers
         unknown_ctls = [f for f in self.result.controller_compatibility_findings
@@ -361,15 +359,10 @@ class ScoringEngine:
             score -= penalty
             factors.append(f"-{penalty}: {len(unknown_ctls)} controller(s) with unknown compatibility")
 
-        # No CRDs detected when there should be
-        if not self.result.snapshot.crds and self.result.detected_controllers:
-            score -= 5
-            factors.append("-5: Controllers detected but no CRDs found (possibly incomplete collection)")
-
         # Version information missing
         if not self.result.snapshot.k8s_version:
             score -= 15
-            factors.append("-15: Kubernetes version not available from cluster")
+            factors.append("-15: Kubernetes version not available from cluster snapshot")
 
         # No node information
         if not self.result.snapshot.nodes:
@@ -384,49 +377,83 @@ class ScoringEngine:
         if self.result.controller_compatibility_findings:
             verified_count = len([f for f in self.result.controller_compatibility_findings
                                    if f.category == IssueCategory.VERIFIED])
-            factors.append(f"+: {verified_count} controller(s) verified against compatibility matrix")
+            if verified_count:
+                factors.append(f"+: {verified_count} controller(s) verified against compatibility matrix")
 
         score = max(10, min(100, score))
         return score, factors
 
-    def _determine_decision(self, readiness_score: int) -> str:
-        """Determine upgrade decision based on readiness score."""
-        if readiness_score >= 90:
-            return "APPROVED"
-        elif readiness_score >= 50:
-            return "CONDITIONAL"
-        else:
+    def _determine_decision(self, readiness_score: int, critical_issues: Optional[List[str]] = None) -> str:
+        """
+        Determine upgrade decision based on readiness score and critical blockers.
+        A critical blocker justifies a NOT RECOMMENDED verdict even when numerical score > 0.
+        """
+        if critical_issues is not None and len(critical_issues) > 0:
             return "NOT RECOMMENDED"
+        elif readiness_score >= 90:
+            return "APPROVED"
+        else:
+            return "CONDITIONAL"
 
     def _collect_critical_issues(self) -> List[str]:
-        """Collect all critical issues for executive summary."""
+        """Collect distinct critical issues for executive summary."""
         issues = []
+        seen = set()
 
-        # PSP removal
+        # 1. API removals (which includes PSP if present in api_removal_findings)
+        for f in self.result.api_removal_findings:
+            if f.severity == Severity.CRITICAL:
+                key = (f.kind, f.object_name, f.current_api)
+                if key not in seen:
+                    seen.add(key)
+                    loc = f" '{f.namespace}/{f.object_name}'" if f.namespace and f.namespace != "cluster-wide" else f" '{f.object_name}'"
+                    issues.append(f"API Removal: {f.kind}{loc} using {f.current_api} will be removed in K8s {f.removal_version}")
+
+        # 2. PSP removal if not already in api_removal_findings
         if self.result.snapshot.pod_security_policies:
             from ai_k8s_upgrader.k8s_database import version_gte
             if version_gte(self.result.target_version, "1.25"):
-                issues.append(
-                    f"PodSecurityPolicy removal: {len(self.result.snapshot.pod_security_policies)} PSP(s) in use - "
-                    f"ALL workloads will fail to start after upgrade"
-                )
+                for psp_name in self.result.snapshot.pod_security_policies:
+                    key = ("PodSecurityPolicy", psp_name, "policy/v1beta1")
+                    if key not in seen:
+                        seen.add(key)
+                        issues.append(
+                            f"PodSecurityPolicy removal: PSP '{psp_name}' in use - workloads controlled by PSP will fail to start after upgrade"
+                        )
 
-        # API removals
-        for f in self.result.api_removal_findings:
-            if f.severity == Severity.CRITICAL:
-                issues.append(f"API Removal: {f.kind} using {f.current_api} will be removed in K8s {f.removal_version}")
-
-        # Incompatible controllers (must-upgrade-before)
+        # 3. Incompatible controllers (must-upgrade-before)
         for f in self.result.controller_compatibility_findings:
             if f.status == Status.CRITICAL:
-                issues.append(f"Controller incompatibility: {f.controller_name} must be upgraded BEFORE Kubernetes upgrade")
+                key = ("controller", f.controller_name)
+                if key not in seen:
+                    seen.add(key)
+                    issues.append(f"Controller incompatibility: {f.controller_name} must be upgraded BEFORE Kubernetes upgrade")
 
-        # Runtime issues
+        # 4. Runtime critical issues (dockershim)
         for i in self.result.runtime_issues:
             if "CRITICAL" in i:
-                issues.append(i)
+                key = ("runtime", i)
+                if key not in seen:
+                    seen.add(key)
+                    issues.append(i)
 
-        return issues[:10]  # Cap at 10
+        # 5. Storage critical issues
+        for i in self.result.storage_issues:
+            if "CRITICAL" in i:
+                key = ("storage", i)
+                if key not in seen:
+                    seen.add(key)
+                    issues.append(i)
+
+        # 6. Networking critical issues
+        for i in self.result.networking_issues:
+            if "CRITICAL" in i:
+                key = ("networking", i)
+                if key not in seen:
+                    seen.add(key)
+                    issues.append(i)
+
+        return issues[:15]
 
     def _collect_high_risks(self) -> List[str]:
         """Collect high risk items for executive summary."""
@@ -485,7 +512,11 @@ class ScoringEngine:
         priority = 1
 
         # PSP migration
-        if self.result.snapshot.pod_security_policies:
+        psp_action_added = False
+        has_psp = bool(self.result.snapshot.pod_security_policies) or any(
+            f.kind == "PodSecurityPolicy" for f in self.result.api_removal_findings
+        )
+        if has_psp:
             from ai_k8s_upgrader.k8s_database import version_gte
             if version_gte(self.result.target_version, "1.25"):
                 actions.append(
@@ -493,6 +524,7 @@ class ScoringEngine:
                     f"Test with PSA labels before removing PSPs."
                 )
                 priority += 1
+                psp_action_added = True
 
         # Docker runtime migration
         for node in self.result.snapshot.nodes:
@@ -516,11 +548,17 @@ class ScoringEngine:
                 priority += 1
 
         # API migration
-        for f in self.result.api_removal_findings[:3]:
-            actions.append(
-                f"{priority}. Migrate {f.kind} resources from {f.current_api} to {f.replacement_api}."
-            )
-            priority += 1
+        seen_api_migrations = set()
+        for f in self.result.api_removal_findings:
+            if f.kind == "PodSecurityPolicy" and psp_action_added:
+                continue
+            key = (f.kind, f.current_api, f.replacement_api)
+            if key not in seen_api_migrations:
+                seen_api_migrations.add(key)
+                actions.append(
+                    f"{priority}. Migrate {f.kind} resources from {f.current_api} to {f.replacement_api}."
+                )
+                priority += 1
 
         # Backup
         actions.append(

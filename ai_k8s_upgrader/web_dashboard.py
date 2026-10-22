@@ -178,7 +178,8 @@ def validate_snapshot_data(data: Any) -> Tuple[bool, Optional[str]]:
         "nodes", "deployments", "statefulsets", "daemonsets", "crds",
         "validating_webhooks", "mutating_webhooks", "storage_classes",
         "persistent_volumes", "persistent_volume_claims", "network_policies",
-        "namespaces", "k8s_version"
+        "namespaces", "k8s_version", "all_resources", "pod_security_policies",
+        "jobs", "cronjobs"
     }
     found_keys = set(data.keys()).intersection(recognized_keys)
     if not found_keys:
@@ -188,13 +189,13 @@ def validate_snapshot_data(data: Any) -> Tuple[bool, Optional[str]]:
         "nodes", "deployments", "statefulsets", "daemonsets", "jobs", "cronjobs",
         "crds", "validating_webhooks", "mutating_webhooks", "storage_classes",
         "persistent_volumes", "persistent_volume_claims", "network_policies",
-        "namespaces"
+        "namespaces", "all_resources", "pod_security_policies"
     ]
     for key in list_keys:
         if key in data and not isinstance(data[key], list):
             return False, f"Invalid snapshot structure: field '{key}' must be a list."
 
-    dict_item_lists = ["nodes", "deployments", "statefulsets", "daemonsets", "crds", "storage_classes"]
+    dict_item_lists = ["nodes", "deployments", "statefulsets", "daemonsets", "crds", "storage_classes", "all_resources"]
     for key in dict_item_lists:
         if key in data:
             for i, item in enumerate(data[key]):

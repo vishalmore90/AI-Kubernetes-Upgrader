@@ -151,19 +151,80 @@ Open `http://localhost:5000` to visualise the Risk Matrix, score gauges, and ful
 
 ---
 
-## 🧪 Testing
+## 📋 Snapshot Formats & Ingestion
 
-The project includes **55+ unit tests** covering all modules:
+AI-Kubernetes-Upgrader accepts JSON snapshots generated from Kubernetes clusters or CI/CD pipelines.
+
+### Supported Snapshot Schemas
+
+1. **Manifest-Level Resource Inventory (`all_resources`)**:
+   ```json
+   {
+     "k8s_version": "1.21",
+     "all_resources": [
+       {
+         "apiVersion": "networking.k8s.io/v1beta1",
+         "kind": "Ingress",
+         "namespace": "production",
+         "name": "legacy-public-ingress"
+       }
+     ]
+   }
+   ```
+2. **Workload Collections**:
+   Supports `deployments`, `statefulsets`, `daemonsets`, `jobs`, `cronjobs`, `crds`, `storage_classes`, and `nodes`. Both Kubernetes-style (`apiVersion`, `kind`, `metadata.name`) and Python dataclass-style keys (`api_version`, `kind`, `name`) are automatically normalized and deduplicated.
+
+### Observed Incompatibilities vs. Release Advisories
+
+To eliminate false positives, the engine strictly separates findings:
+- **Observed Incompatibilities (Verified Blockers)**: The cluster snapshot contains actual resource evidence matching a removed API or breaking change in the requested source-to-target version range.
+- **Observed Deprecated APIs (Warning)**: Matching resource evidence exists, but the API is deprecated and not yet removed at the target release.
+- **Upcoming Release Advisories (Informational)**: General Kubernetes release changes scheduled for future versions beyond your target release. Never presented as cluster blockers.
+- **Data Completeness & Confidence Score**:
+  - `VERIFIED_EMPTY`: Explicit clean inventory provided (`all_resources: []`). Confidence score: 80–100%.
+  - `MISSING`: No inventory provided. Confidence is penalized (-20%) and an advisory is raised.
+  - `COLLECTION_ERRORS`: Collector encountered permission or connectivity failures. Logged in assessment errors.
+
+---
+
+## 🔍 Live-Cluster Collection Capabilities & Limitations
+
+- **What Live Collection CAN Prove**:
+  - Node topology, kubelet versions, and container runtimes (e.g. Dockershim presence).
+  - Controller and operator versions running in the cluster.
+  - In-tree storage provisioners and admission webhooks with failure policies.
+  - Resource usage pressures (CPU/Memory/Disk).
+- **What Live Collection CANNOT Prove**:
+  - Original YAML manifest versions: `kubectl get` returns resources converted into the API server's preferred or storage version. If a client deployed an object using a deprecated API version, the live API server may serve it under a newer version.
+  - Recommendation: For 100% manifest fidelity, scan YAML manifests directly from your GitOps/CI repositories using snapshot format alongside cluster assessment.
+
+---
+
+## 🧪 Testing & Regression Verification
+
+The project includes **93 automated tests** covering unit behavior and 10 end-to-end regression scenarios:
 
 ```bash
-# Run all tests
-pytest
+# Run all unit and regression tests
+pytest -v
 
-# Run a specific module
-python -m pytest tests/test_engine.py -v
+# Run the 10 Phase 4 regression scenarios specifically
+pytest tests/test_regression.py -v
 ```
 
-Test coverage spans: Database, Cluster Collector, Assessment Engine, Scoring Matrix, and Reporter.
+### Reproducing Regression Scenarios
+
+The suite in `tests/test_regression.py` tests:
+1. `test_scenario_1_single_legacy_ingress`: Single legacy Ingress (v1beta1) in 1.21→1.22. Verifies exactly 1 finding, migration to `networking.k8s.io/v1`, and 0 manufactured webhook/CRD errors.
+2. `test_scenario_2_clean_api_inventory`: Clean cluster in 1.21→1.22. Verifies 0 false API removal findings.
+3. `test_scenario_3_modern_ingress_api`: Ingress using `networking.k8s.io/v1`. Verifies no false removal.
+4. `test_scenario_4_docker_runtime_compatibility`: 1.23→1.24 with Docker and containerd nodes. Verifies dockershim removal flag on Docker node only and CRI remediation.
+5. `test_scenario_5_hpa_api_removal`: 1.25→1.26 with `autoscaling/v2beta2` HPA. Verifies detection, recommendation of `autoscaling/v2`, and no duplicate critical blockers.
+6. `test_scenario_6_psp_removal`: 1.24→1.25 comparison between PSP present vs PSP absent.
+7. `test_scenario_7_flowschema_removal`: 1.28→1.29 FlowSchema/PriorityLevelConfiguration v1beta2 removal distinguished from 1.32 v1beta3 removal.
+8. `test_scenario_8_missing_versus_empty_inventory`: Verified clean vs missing inventory vs collection errors.
+9. `test_scenario_9_web_dashboard_upload`: Web route `/api/assess` multipart upload, valid/invalid handling, and export streaming.
+10. `test_scenario_10_report_and_score_consistency`: Deterministic scoring, non-duplication in Markdown and JSON.
 
 ---
 

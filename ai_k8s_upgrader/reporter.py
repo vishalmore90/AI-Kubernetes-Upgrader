@@ -219,6 +219,7 @@ def _generate_step1(result: AssessmentResult) -> List[str]:
         f"| Namespaces | `{ci.get('namespaces', 0)}` |",
         f"| Source Version | `{result.source_version}` |",
         f"| Target Version | `{result.target_version}` |",
+        f"| Resource Inventory Coverage | `{getattr(result, 'inventory_status', 'N/A')}` |",
         "",
     ]
 
@@ -425,26 +426,44 @@ def _generate_step7(result: AssessmentResult) -> List[str]:
 
     if not result.deprecated_api_findings:
         lines += [
-            "✅ **No deprecated APIs requiring immediate action detected.**",
-            "",
-            "---",
+            "✅ **No deprecated APIs requiring immediate action detected in observed resources.**",
             "",
         ]
-        return lines
+    else:
+        lines += [
+            "| Namespace | Object | API Version | Risk Level | Planned Removal | Migration Required |",
+            "|---|---|---|---|---|---|",
+        ]
 
-    lines += [
-        "| Namespace | Object | API Version | Risk Level | Planned Removal | Migration Required |",
-        "|---|---|---|---|---|---|",
-    ]
+        for f in result.deprecated_api_findings:
+            risk_e = "🔴" if f.risk_level == "HIGH" else "⚠️"
+            lines.append(
+                f"| {f.namespace} | {f.object_name} | `{f.api_version}` | "
+                f"{risk_e} {f.risk_level} | v{f.planned_removal_version} | {f.migration_required[:80]} |"
+            )
+        lines.append("")
 
-    for f in result.deprecated_api_findings:
-        risk_e = "🔴" if f.risk_level == "HIGH" else "⚠️"
-        lines.append(
-            f"| {f.namespace} | {f.object_name} | `{f.api_version}` | "
-            f"{risk_e} {f.risk_level} | v{f.planned_removal_version} | {f.migration_required[:80]} |"
-        )
+    upcoming = getattr(result, "upcoming_release_changes", [])
+    if upcoming:
+        lines += [
+            "### Upcoming / Informational Deprecations (Beyond Target Version)",
+            "",
+            "> Note: These APIs are documented in release deprecation schedules but are not observed as immediate blockers for your target upgrade.",
+            "",
+            "| Object / Kind | Deprecated API | Planned Removal | Replacement |",
+            "|---|---|---|---|",
+        ]
+        for f in upcoming:
+            k = f.get("kind", "") if isinstance(f, dict) else getattr(f, "kind", "")
+            av = f.get("api_version", "") if isinstance(f, dict) else getattr(f, "api_version", "")
+            pr = f.get("planned_removal", "") if isinstance(f, dict) else getattr(f, "planned_removal", "")
+            rep = f.get("replacement", "") if isinstance(f, dict) else getattr(f, "replacement", "")
+            lines.append(
+                f"| {k} | `{av}` | v{pr} | {rep[:80]} |"
+            )
+        lines.append("")
 
-    lines += ["", "---", ""]
+    lines += ["---", ""]
     return lines
 
 
@@ -898,6 +917,7 @@ def generate_json_report(result: AssessmentResult, scoring: ScoringResult) -> st
             "source_version": result.source_version,
             "target_version": result.target_version,
             "intermediate_versions": result.intermediate_versions,
+            "inventory_status": getattr(result, "inventory_status", "UNKNOWN"),
         },
         "executive_summary": {
             "upgrade_decision": scoring.upgrade_decision,
@@ -940,6 +960,15 @@ def generate_json_report(result: AssessmentResult, scoring: ScoringResult) -> st
                 "planned_removal": f.planned_removal_version,
             }
             for f in result.deprecated_api_findings
+        ],
+        "upcoming_release_changes": [
+            {
+                "kind": f.get("kind", "") if isinstance(f, dict) else getattr(f, "kind", ""),
+                "api_version": f.get("api_version", "") if isinstance(f, dict) else getattr(f, "api_version", ""),
+                "planned_removal": f.get("planned_removal", "") if isinstance(f, dict) else getattr(f, "planned_removal", ""),
+                "replacement": f.get("replacement", "") if isinstance(f, dict) else getattr(f, "replacement", ""),
+            }
+            for f in getattr(result, "upcoming_release_changes", [])
         ],
         "controller_compatibility": [
             {

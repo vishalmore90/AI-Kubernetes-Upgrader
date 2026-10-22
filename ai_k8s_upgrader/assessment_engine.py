@@ -29,7 +29,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ai_k8s_upgrader.cluster_collector import ClusterSnapshot, NodeInfo, WorkloadResource
+from ai_k8s_upgrader.cluster_collector import (
+    ClusterSnapshot, NodeInfo, WorkloadResource, build_resource_inventory, NormalizedResource
+)
 from ai_k8s_upgrader import k8s_database as db
 
 logger = logging.getLogger(__name__)
@@ -227,6 +229,10 @@ class AssessmentResult:
     # Incompatibility reports (mandatory rule)
     incompatibility_reports: List[IncompatibilityReport] = field(default_factory=list)
 
+    # Completeness and upcoming changes
+    inventory_status: str = "AVAILABLE"  # "AVAILABLE" | "VERIFIED_EMPTY" | "MISSING" | "COLLECTION_ERRORS"
+    upcoming_release_changes: List[Dict[str, str]] = field(default_factory=list)
+
     # Errors during assessment
     assessment_errors: List[str] = field(default_factory=list)
 
@@ -246,11 +252,22 @@ class AssessmentEngine:
         self.target = target_version.lstrip("v")
         self.snapshot = snapshot
         self.intermediate = db.get_intermediate_versions(self.source, self.target)
+
+        # Determine inventory completeness
+        if self.snapshot.collection_errors:
+            inv_status = "COLLECTION_ERRORS"
+        elif not getattr(self.snapshot, "all_resources_provided", True):
+            inv_status = "MISSING"
+        else:
+            inv = build_resource_inventory(self.snapshot)
+            inv_status = "AVAILABLE" if inv else "VERIFIED_EMPTY"
+
         self.result = AssessmentResult(
             source_version=self.source,
             target_version=self.target,
             intermediate_versions=self.intermediate,
             snapshot=snapshot,
+            inventory_status=inv_status,
         )
 
     def run_all(self) -> AssessmentResult:
@@ -375,109 +392,135 @@ class AssessmentEngine:
     # Step 6: API Removal Analysis
     # ------------------------------------------------------------------
     def _step6_api_removal(self):
+        inventory = build_resource_inventory(self.snapshot)
         removed_apis = db.get_removed_apis_in_range(self.source, self.target)
         findings = []
 
-        # Build lookup set of API version/kind combinations from cluster
-        cluster_api_versions = set()
-        for res in self.snapshot.all_resources:
-            api_ver = res.get("apiVersion", "")
-            kind = res.get("kind", "")
-            if api_ver and kind:
-                cluster_api_versions.add((api_ver, kind))
+        if self.snapshot.collection_errors:
+            self.result.inventory_status = "COLLECTION_ERRORS"
+            for err in self.snapshot.collection_errors:
+                self.result.assessment_errors.append(f"Collection error: {err}")
+        elif not self.snapshot.all_resources_provided:
+            self.result.inventory_status = "MISSING"
+        elif len(inventory) == 0:
+            self.result.inventory_status = "VERIFIED_EMPTY"
+        else:
+            self.result.inventory_status = "AVAILABLE"
+
+        is_cluster_scoped = {
+            "ClusterRole", "ClusterRoleBinding", "PodSecurityPolicy",
+            "IngressClass", "CustomResourceDefinition", "FlowSchema",
+            "PriorityLevelConfiguration", "StorageClass", "CSIDriver", "CSINode"
+        }
 
         for removed in removed_apis:
             api_ver = f"{removed.group}/{removed.version}" if removed.group else removed.version
-            # Check if this API is actually in use
-            found_in_cluster = (api_ver, removed.kind) in cluster_api_versions
 
-            # Also check by scanning workloads directly
-            if not found_in_cluster:
-                for w in (self.snapshot.deployments + self.snapshot.statefulsets +
-                          self.snapshot.daemonsets + self.snapshot.jobs + self.snapshot.cronjobs):
-                    w_api = w.api_version.strip()
-                    if w_api == api_ver and w.kind == removed.kind:
-                        found_in_cluster = True
-                        break
+            # Match strictly against observed cluster resources
+            matching = [
+                res for res in inventory
+                if res.kind == removed.kind and (
+                    (res.group == removed.group and res.version == removed.version)
+                    or res.api_version == api_ver
+                )
+            ]
 
-            # Special case: PSP is detected separately
-            if removed.kind == "PodSecurityPolicy" and self.snapshot.pod_security_policies:
-                found_in_cluster = True
+            if not matching:
+                continue
 
-            if found_in_cluster or self._is_api_potentially_in_use(removed):
-                replacement = (f"{removed.replacement_group}/{removed.replacement_version} {removed.replacement_kind}"
-                               if removed.replacement_group else "NO REPLACEMENT (API completely removed)")
+            replacement = (
+                f"{removed.replacement_group}/{removed.replacement_version} {removed.replacement_kind}"
+                if (removed.replacement_group or removed.replacement_version or removed.replacement_kind)
+                else "NO REPLACEMENT (API completely removed)"
+            )
+
+            for res in matching:
+                ns = res.namespace if res.namespace else ("cluster-wide" if removed.kind in is_cluster_scoped else "default")
+                obj_name = res.name if res.name else f"{removed.kind}"
+                loc = f" '{ns}/{obj_name}'" if ns != "cluster-wide" else f" '{obj_name}'"
+
                 findings.append(APIRemovalFinding(
-                    namespace="cluster-wide" if removed.kind in ["ClusterRole", "ClusterRoleBinding",
-                                                                   "PodSecurityPolicy", "IngressClass"] else "multiple",
-                    object_name=f"{removed.kind}(s)",
+                    namespace=ns,
+                    object_name=obj_name,
                     kind=removed.kind,
-                    current_api=api_ver,
+                    current_api=res.api_version,
                     removal_version=removed.removal_version,
                     replacement_api=replacement,
-                    impact=f"Resources using {api_ver} will fail to be served after upgrade to v{removed.removal_version}",
+                    impact=f"Resource{loc} uses {res.api_version} which is removed in Kubernetes v{removed.removal_version}",
                     severity=Severity.CRITICAL,
-                    required_action=f"Migrate all {removed.kind} resources to {replacement}. {removed.notes}",
-                    category=IssueCategory.VERIFIED if found_in_cluster else IssueCategory.PROBABLE,
+                    required_action=f"Migrate {removed.kind} '{obj_name}' to {replacement}. {removed.notes}",
+                    category=IssueCategory.VERIFIED,
                 ))
 
-                # Generate mandatory incompatibility report
                 self.result.incompatibility_reports.append(IncompatibilityReport(
-                    what_will_break=f"{removed.kind} resources using API {api_ver}",
+                    what_will_break=f"{removed.kind} '{obj_name}' using API {res.api_version}",
                     when_it_will_break="Control Plane Upgrade",
-                    impact="Deployment Failure / Outage" if removed.kind == "PodSecurityPolicy" else "Partial Outage / Deployment Failure",
+                    impact="Outage - all PSP-controlled workloads fail to start" if removed.kind == "PodSecurityPolicy" else "Deployment Failure / Resource Unavailability",
                     severity=Severity.CRITICAL,
-                    remediation=f"Before upgrading: migrate all {removed.kind} resources to {replacement}. {removed.notes}",
-                    category=IssueCategory.VERIFIED if found_in_cluster else IssueCategory.PROBABLE,
+                    remediation=f"Before upgrading: migrate {removed.kind} '{obj_name}' to {replacement}. {removed.notes}",
+                    category=IssueCategory.VERIFIED,
                 ))
 
         self.result.api_removal_findings = findings
-
-    def _is_api_potentially_in_use(self, api: db.RemovedAPI) -> bool:
-        """
-        Check if a removed API is potentially in use based on installed operators
-        and detected components.
-        """
-        # High-risk APIs that are commonly used or installed by default
-        high_risk_kinds = {
-            "PodSecurityPolicy", "Ingress", "IngressClass",
-            "MutatingWebhookConfiguration", "ValidatingWebhookConfiguration",
-            "CustomResourceDefinition", "CronJob", "HorizontalPodAutoscaler",
-            "FlowSchema", "PriorityLevelConfiguration",
-            "PodDisruptionBudget", "RuntimeClass", "EndpointSlice",
-        }
-        return api.kind in high_risk_kinds
 
     # ------------------------------------------------------------------
     # Step 7: Deprecated API Analysis
     # ------------------------------------------------------------------
     def _step7_deprecated_apis(self):
+        inventory = build_resource_inventory(self.snapshot)
         deprecated_apis = db.get_deprecated_apis_in_range(self.source, self.target)
         findings = []
+        upcoming = []
+
+        is_cluster_scoped = {
+            "ClusterRole", "ClusterRoleBinding", "PodSecurityPolicy",
+            "IngressClass", "CustomResourceDefinition", "FlowSchema",
+            "PriorityLevelConfiguration", "StorageClass", "CSIDriver", "CSINode"
+        }
 
         for dep in deprecated_apis:
+            # If the API was removed within the requested upgrade range,
+            # it is already captured as an API removal finding in Step 6.
+            # Avoid duplicating the same issue as both a critical removal and an independent deprecated finding.
+            if db.version_gt(dep.planned_removal_version, self.source) and db.version_lte(dep.planned_removal_version, self.target):
+                continue
+
             api_ver = f"{dep.group}/{dep.version}" if dep.group else dep.version
-
-            risk = "HIGH" if db.version_lte(dep.planned_removal_version, self.target) else "MEDIUM"
-            if db.version_lte(dep.planned_removal_version, self.target):
-                migration_note = f"REQUIRED: API will be REMOVED in v{dep.planned_removal_version} (within upgrade range)"
-                risk = "HIGH"
-            else:
-                migration_note = f"RECOMMENDED: API planned for removal in v{dep.planned_removal_version}"
-                risk = "MEDIUM"
-
             replacement = f"{dep.replacement_group}/{dep.replacement_version} {dep.replacement_kind}"
-            findings.append(DeprecatedAPIFinding(
-                namespace="all",
-                object_name=f"{dep.kind}",
-                api_version=api_ver,
-                risk_level=risk,
-                planned_removal_version=dep.planned_removal_version,
-                migration_required=f"{migration_note}. Migrate to: {replacement}",
-                category=IssueCategory.PROBABLE,
-            ))
+
+            # Check if this deprecated API is ACTUALLY present in the cluster inventory
+            matching = [
+                res for res in inventory
+                if res.kind == dep.kind and (
+                    (res.group == dep.group and res.version == dep.version)
+                    or res.api_version == api_ver
+                )
+            ]
+
+            for res in matching:
+                ns = res.namespace if res.namespace else ("cluster-wide" if dep.kind in is_cluster_scoped else "default")
+                obj_name = res.name if res.name else f"{dep.kind}"
+                findings.append(DeprecatedAPIFinding(
+                    namespace=ns,
+                    object_name=obj_name,
+                    api_version=res.api_version,
+                    risk_level="MEDIUM",
+                    planned_removal_version=dep.planned_removal_version,
+                    migration_required=f"RECOMMENDED: API planned for removal in v{dep.planned_removal_version}. Migrate to: {replacement}",
+                    category=IssueCategory.VERIFIED,
+                ))
+
+            # Record upcoming release changes for future versions (informational only)
+            if db.version_gt(dep.planned_removal_version, self.target):
+                upcoming.append({
+                    "kind": dep.kind,
+                    "api_version": api_ver,
+                    "planned_removal": dep.planned_removal_version,
+                    "replacement": replacement,
+                })
 
         self.result.deprecated_api_findings = findings
+        self.result.upcoming_release_changes = upcoming
 
     # ------------------------------------------------------------------
     # Step 8: CRD Compatibility Analysis
@@ -696,11 +739,9 @@ class AssessmentEngine:
 
         # Ingress API check
         if db.version_gte(self.target, "1.22") and db.version_lt(self.source, "1.22"):
-            for api_finding in self.result.api_removal_findings:
-                if "Ingress" in api_finding.kind:
-                    issues.append("CRITICAL: Ingress API removal to networking.k8s.io/v1 - ingress resources and controllers MUST be migrated.")
-                    can_break = True
-                    break
+            ingress_removals = [f for f in self.result.api_removal_findings if "Ingress" in f.kind]
+            if ingress_removals:
+                issues.append(f"ADVISORY: {len(ingress_removals)} Ingress resource(s) require migration to networking.k8s.io/v1.")
 
         status = Status.CRITICAL if any("CRITICAL" in i for i in issues) else (
             Status.HIGH_RISK if can_break else (
@@ -801,19 +842,20 @@ class AssessmentEngine:
                 f"Migrate to Pod Security Admission (PSA) or Kyverno/OPA before upgrading."
             )
             can_break = True
-            self.result.incompatibility_reports.append(IncompatibilityReport(
-                what_will_break=f"All workloads controlled by {count} PodSecurityPolicy object(s)",
-                when_it_will_break="Control Plane Upgrade",
-                impact="Outage - all PSP-controlled workloads fail to start",
-                severity=Severity.CRITICAL,
-                remediation=(
-                    "1. Audit all PSPs and replace with Pod Security Admission namespace labels. "
-                    "2. Install alternative policy engine (Kyverno or OPA/Gatekeeper). "
-                    "3. Test workloads with PSA before removing PSPs. "
-                    "4. Remove PSPs only after migration is validated."
-                ),
-                category=IssueCategory.VERIFIED,
-            ))
+            if not any("PodSecurityPolicy" in r.what_will_break for r in self.result.incompatibility_reports):
+                self.result.incompatibility_reports.append(IncompatibilityReport(
+                    what_will_break=f"All workloads controlled by {count} PodSecurityPolicy object(s)",
+                    when_it_will_break="Control Plane Upgrade",
+                    impact="Outage - all PSP-controlled workloads fail to start",
+                    severity=Severity.CRITICAL,
+                    remediation=(
+                        "1. Audit all PSPs and replace with Pod Security Admission namespace labels. "
+                        "2. Install alternative policy engine (Kyverno or OPA/Gatekeeper). "
+                        "3. Test workloads with PSA before removing PSPs. "
+                        "4. Remove PSPs only after migration is validated."
+                    ),
+                    category=IssueCategory.VERIFIED,
+                ))
 
         # Check PSA
         if not self.snapshot.has_pod_security_admission and db.version_gte(self.target, "1.25"):
@@ -845,11 +887,16 @@ class AssessmentEngine:
                 f"Review security context changes in target K8s version."
             )
 
-        # RBAC
-        if db.version_gte(self.target, "1.22") and db.version_lt(self.source, "1.22"):
+        # RBAC check - ONLY if v1beta1 RBAC resources are observed in cluster!
+        inventory = build_resource_inventory(self.snapshot)
+        rbac_v1beta1 = [
+            r for r in inventory
+            if r.group == "rbac.authorization.k8s.io" and r.version == "v1beta1"
+        ]
+        if rbac_v1beta1 and db.version_gte(self.target, "1.22") and db.version_lt(self.source, "1.22"):
             issues.append(
-                "K8s 1.22: All RBAC resources (ClusterRole, Role, etc.) must use rbac.authorization.k8s.io/v1. "
-                "v1beta1 RBAC APIs are removed."
+                f"CRITICAL: {len(rbac_v1beta1)} RBAC resource(s) using rbac.authorization.k8s.io/v1beta1 detected. "
+                "All RBAC resources must use rbac.authorization.k8s.io/v1 (v1beta1 RBAC APIs are removed in K8s 1.22)."
             )
             can_break = True
 
@@ -1132,13 +1179,21 @@ class AssessmentEngine:
                 severity=Severity.HIGH,
                 category=IssueCategory.PROBABLE,
             ))
-        else:
+        elif self.snapshot.crds:
             scenarios.append(FailureScenario(
                 scenario="Could CRDs become unreadable?",
                 answer="NO",
                 reason=f"No CRD breaking issues detected. {len(self.snapshot.crds)} CRD(s) appear compatible.",
                 severity=Severity.LOW,
                 category=IssueCategory.POSSIBLE,
+            ))
+        else:
+            scenarios.append(FailureScenario(
+                scenario="Could CRDs become unreadable?",
+                answer="NO",
+                reason="No CustomResourceDefinitions installed in the cluster.",
+                severity=Severity.LOW,
+                category=IssueCategory.VERIFIED,
             ))
 
         # 4. Could CRD controllers stop reconciling?
@@ -1150,7 +1205,7 @@ class AssessmentEngine:
                 severity=Severity.HIGH,
                 category=IssueCategory.PROBABLE,
             ))
-        else:
+        elif self.snapshot.crds or broken_controllers:
             scenarios.append(FailureScenario(
                 scenario="Could CRD controllers stop reconciling?",
                 answer="NO",
@@ -1158,10 +1213,19 @@ class AssessmentEngine:
                 severity=Severity.LOW,
                 category=IssueCategory.POSSIBLE,
             ))
+        else:
+            scenarios.append(FailureScenario(
+                scenario="Could CRD controllers stop reconciling?",
+                answer="NO",
+                reason="No CRDs or incompatible controllers installed in the cluster.",
+                severity=Severity.LOW,
+                category=IssueCategory.VERIFIED,
+            ))
 
         # 5. Could admission webhooks block deployments?
         blocking_webhooks = [f for f in self.result.webhook_findings
                               if f.can_block_workloads and f.failure_policy == "Fail"]
+        has_webhooks = bool(self.snapshot.validating_webhooks or self.snapshot.mutating_webhooks)
         if blocking_webhooks:
             scenarios.append(FailureScenario(
                 scenario="Could admission webhooks block deployments?",
@@ -1171,13 +1235,21 @@ class AssessmentEngine:
                 severity=Severity.HIGH,
                 category=IssueCategory.PROBABLE,
             ))
-        else:
+        elif has_webhooks:
             scenarios.append(FailureScenario(
                 scenario="Could admission webhooks block deployments?",
                 answer="POSSIBLE",
-                reason="No Fail-policy webhooks detected. Monitor webhook endpoints during upgrade.",
+                reason="Admission webhooks present without Fail-policy. Monitor webhook endpoints during upgrade.",
                 severity=Severity.LOW,
                 category=IssueCategory.POSSIBLE,
+            ))
+        else:
+            scenarios.append(FailureScenario(
+                scenario="Could admission webhooks block deployments?",
+                answer="NO",
+                reason="No admission webhooks installed in the cluster.",
+                severity=Severity.LOW,
+                category=IssueCategory.VERIFIED,
             ))
 
         # 6. Could storage become inaccessible?

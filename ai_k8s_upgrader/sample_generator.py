@@ -701,6 +701,8 @@ def _generate_all_resources() -> list:
         {"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "namespace": "production", "name": "api-hpa"},
         # Old API that might still be in some configs
         {"apiVersion": "autoscaling/v2beta2", "kind": "HorizontalPodAutoscaler", "namespace": "staging", "name": "staging-hpa"},
+        # FlowSchema v1beta2 (removed in 1.29)
+        {"apiVersion": "flowcontrol.apiserver.k8s.io/v1beta2", "kind": "FlowSchema", "namespace": "", "name": "exempt-limited"},
     ]
 
 

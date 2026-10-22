@@ -118,21 +118,33 @@ class NetworkPolicyInfo:
     policy_types: List[str]
 
 
+@dataclass(frozen=True)
+class NormalizedResource:
+    """Normalized representation of a single Kubernetes resource object."""
+    group: str
+    version: str
+    kind: str
+    namespace: str
+    name: str
+    api_version: str
+    source_collection: str = "all_resources"
+
+
 @dataclass
 class ClusterSnapshot:
     """Complete normalized cluster state for assessment."""
     # Source of data
-    source_mode: str            # "live" | "snapshot" | "sample"
+    source_mode: str = "snapshot"            # "live" | "snapshot" | "sample"
 
     # Step 1: Cluster Info
-    k8s_version: str
-    k8s_git_version: str
-    api_server_version: str
-    platform: str               # e.g., "linux/amd64"
-    cluster_name: str
-    is_managed: bool            # EKS, GKE, AKS, etc.
-    managed_provider: str       # "eks" | "gke" | "aks" | "self-managed"
-    ha_control_plane: bool
+    k8s_version: str = "1.25"
+    k8s_git_version: str = ""
+    api_server_version: str = ""
+    platform: str = "linux/amd64"            # e.g., "linux/amd64"
+    cluster_name: str = "cluster"
+    is_managed: bool = False                 # EKS, GKE, AKS, etc.
+    managed_provider: str = "self-managed"   # "eks" | "gke" | "aks" | "self-managed"
+    ha_control_plane: bool = True
 
     # Step 1: Nodes
     nodes: List[NodeInfo] = field(default_factory=list)
@@ -183,9 +195,121 @@ class ClusterSnapshot:
 
     # All resource objects (flat list for API scanning)
     all_resources: List[Dict] = field(default_factory=list)
+    all_resources_provided: bool = True
 
     # Errors during collection
     collection_errors: List[str] = field(default_factory=list)
+
+    def get_normalized_inventory(self) -> List[NormalizedResource]:
+        """Return normalized, deduplicated list of all observed cluster resources."""
+        return build_resource_inventory(self)
+
+
+def build_resource_inventory(snapshot: ClusterSnapshot) -> List[NormalizedResource]:
+    """
+    Build a deduplicated, normalized inventory of Kubernetes resources observed
+    in the cluster across all supported snapshot collections:
+    1. snapshot.all_resources
+    2. snapshot.deployments, statefulsets, daemonsets, jobs, cronjobs
+    3. snapshot.pod_security_policies
+    """
+    raw_resources: List[NormalizedResource] = []
+
+    # 1. From all_resources
+    for item in snapshot.all_resources:
+        if not isinstance(item, dict):
+            continue
+        api_ver = (item.get("apiVersion") or item.get("api_version") or "").strip()
+        kind = (item.get("kind") or "").strip()
+        if not api_ver or not kind:
+            continue
+
+        meta = item.get("metadata")
+        if isinstance(meta, dict):
+            name = (meta.get("name") or item.get("name") or "").strip()
+            namespace = (meta.get("namespace") or item.get("namespace") or "").strip()
+        else:
+            name = (item.get("name") or "").strip()
+            namespace = (item.get("namespace") or "").strip()
+
+        if "/" in api_ver:
+            group, version = api_ver.split("/", 1)
+        else:
+            group = ""
+            version = api_ver
+
+        raw_resources.append(NormalizedResource(
+            group=group.strip(),
+            version=version.strip(),
+            kind=kind,
+            namespace=namespace,
+            name=name,
+            api_version=api_ver,
+            source_collection="all_resources",
+        ))
+
+    # 2. From workloads
+    workload_lists = [
+        snapshot.deployments,
+        snapshot.statefulsets,
+        snapshot.daemonsets,
+        snapshot.jobs,
+        snapshot.cronjobs,
+    ]
+    for w_list in workload_lists:
+        for w in w_list:
+            api_ver = (getattr(w, "api_version", "") or "").strip()
+            kind = (getattr(w, "kind", "") or "").strip()
+            name = (getattr(w, "name", "") or "").strip()
+            namespace = (getattr(w, "namespace", "") or "").strip()
+            if not api_ver or not kind:
+                continue
+
+            if "/" in api_ver:
+                group, version = api_ver.split("/", 1)
+            else:
+                group = ""
+                version = api_ver
+
+            raw_resources.append(NormalizedResource(
+                group=group.strip(),
+                version=version.strip(),
+                kind=kind,
+                namespace=namespace,
+                name=name,
+                api_version=api_ver,
+                source_collection="workloads",
+            ))
+
+    # 3. From pod_security_policies
+    for psp in snapshot.pod_security_policies:
+        if isinstance(psp, str):
+            psp_name = psp.strip()
+        elif isinstance(psp, dict):
+            psp_name = (psp.get("name") or psp.get("metadata", {}).get("name") or "").strip()
+        else:
+            psp_name = str(psp).strip()
+        if psp_name:
+            raw_resources.append(NormalizedResource(
+                group="policy",
+                version="v1beta1",
+                kind="PodSecurityPolicy",
+                namespace="",
+                name=psp_name,
+                api_version="policy/v1beta1",
+                source_collection="pod_security_policies",
+            ))
+
+    # Deduplicate while preserving order
+    seen = set()
+    deduped: List[NormalizedResource] = []
+    for res in raw_resources:
+        key = (res.group, res.version, res.kind, res.namespace, res.name)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(res)
+
+    return deduped
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +656,17 @@ class LiveClusterCollector:
         return "self-managed", False
 
     def _collect_all_resources(self) -> List[Dict]:
-        """Collect all resources across common API groups for API version scanning."""
+        """
+        Collect resources across key API groups for API version scanning.
+
+        Live Collection Limitation:
+        `kubectl get <resource> -o json` queries the live API server, which serves
+        resources translated into the API server's current preferred/storage version.
+        Live collection cannot reliably detect whether a resource was originally applied
+        using a deprecated or removed API version in source manifests/Helm charts.
+        For reliable manifest-level deprecation detection, snapshots generated from
+        manifest trees, Helm release secrets, or Kubernetes audit logs should be used.
+        """
         resources = []
         # Sample key resource types
         resource_types = [
@@ -596,7 +730,22 @@ class SnapshotClusterCollector:
         """Parse snapshot JSON into ClusterSnapshot fields."""
         nodes = []
         for n in data.get("nodes", []):
-            nodes.append(NodeInfo(**n))
+            if isinstance(n, NodeInfo):
+                nodes.append(n)
+            elif isinstance(n, dict):
+                norm_node = {
+                    "name": n.get("name", "node"),
+                    "role": n.get("role", "worker"),
+                    "k8s_version": n.get("k8s_version") or n.get("version") or n.get("kubelet_version") or data.get("k8s_version", ""),
+                    "os_image": n.get("os_image") or n.get("os") or "linux",
+                    "kernel_version": n.get("kernel_version", ""),
+                    "container_runtime": n.get("container_runtime") or n.get("runtime") or "containerd://1.6.0",
+                    "status": n.get("status", "Ready"),
+                    "cpu": str(n.get("cpu", "4")),
+                    "memory": str(n.get("memory", "16Gi")),
+                    "architecture": n.get("architecture", "amd64"),
+                }
+                nodes.append(NodeInfo(**norm_node))
 
         deployments = [WorkloadResource(**d) for d in data.get("deployments", [])]
         statefulsets = [WorkloadResource(**d) for d in data.get("statefulsets", [])]
@@ -613,6 +762,12 @@ class SnapshotClusterCollector:
 
         cp_count = sum(1 for n in nodes if n.role == "control-plane")
         worker_count = sum(1 for n in nodes if n.role == "worker")
+
+        has_all_res = ("all_resources" in data and data["all_resources"] is not None)
+        all_res = data.get("all_resources", []) if has_all_res else []
+        if all_res is None:
+            all_res = []
+            has_all_res = False
 
         return dict(
             k8s_version=data.get("k8s_version", ""),
@@ -650,7 +805,8 @@ class SnapshotClusterCollector:
             detected_operators=data.get("detected_operators", {}),
             api_resources=data.get("api_resources", []),
             api_services=data.get("api_services", []),
-            all_resources=data.get("all_resources", []),
+            all_resources=all_res,
+            all_resources_provided=has_all_res,
             collection_errors=data.get("collection_errors", []),
         )
 

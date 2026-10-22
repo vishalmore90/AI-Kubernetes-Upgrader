@@ -396,10 +396,22 @@ DEPRECATED_APIS: List[DeprecatedAPI] = [
         replacement_group="flowcontrol.apiserver.k8s.io", replacement_version="v1beta3", replacement_kind="FlowSchema",
     ),
     DeprecatedAPI(
+        group="flowcontrol.apiserver.k8s.io", version="v1beta2", kind="PriorityLevelConfiguration",
+        deprecated_in_version="1.26",
+        planned_removal_version="1.29",
+        replacement_group="flowcontrol.apiserver.k8s.io", replacement_version="v1beta3", replacement_kind="PriorityLevelConfiguration",
+    ),
+    DeprecatedAPI(
         group="flowcontrol.apiserver.k8s.io", version="v1beta3", kind="FlowSchema",
         deprecated_in_version="1.29",
         planned_removal_version="1.32",
         replacement_group="flowcontrol.apiserver.k8s.io", replacement_version="v1", replacement_kind="FlowSchema",
+    ),
+    DeprecatedAPI(
+        group="flowcontrol.apiserver.k8s.io", version="v1beta3", kind="PriorityLevelConfiguration",
+        deprecated_in_version="1.29",
+        planned_removal_version="1.32",
+        replacement_group="flowcontrol.apiserver.k8s.io", replacement_version="v1", replacement_kind="PriorityLevelConfiguration",
     ),
 ]
 
