@@ -1,5 +1,9 @@
 # ⚙️ AI-Kubernetes-Upgrader
 
+[![CI](https://github.com/vishalmore90/AI-Kubernetes-Upgrader/actions/workflows/ci.yml/badge.svg)](https://github.com/vishalmore90/AI-Kubernetes-Upgrader/actions/workflows/ci.yml)
+[![Python Version](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/vishalmore90/AI-Kubernetes-Upgrader)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+
 > A comprehensive, automated, evidence-based Kubernetes **upgrade feasibility, compatibility, and risk assessment engine**.  
 > Systematically analyses cluster resources, API deprecations, CRDs, controllers, webhooks, networking, storage, and security before you upgrade.
 
@@ -106,6 +110,11 @@ k8s-upgrade-assess --source 1.27 --target 1.30 --snapshot cluster.json
 k8s-upgrade-assess --source 1.27 --target 1.30 --live
 ```
 
+**Validate Snapshot** — verify schema and inspect object inventory without running assessment:
+```bash
+k8s-upgrade-assess validate-snapshot cluster.json
+```
+
 ### Launch the Web Dashboard
 
 ```bash
@@ -113,6 +122,14 @@ k8s-upgrade-assess serve --port 5000
 ```
 
 Open `http://localhost:5000` to visualise the Risk Matrix, score gauges, and full assessment results interactively.
+
+### Health Probes (Liveness & Readiness)
+
+The dashboard provides `/healthz` and `/health` endpoints returning HTTP 200 with service health status for container orchestration and hosting platforms (e.g., Render, Kubernetes):
+```bash
+curl http://localhost:5000/healthz
+# {"service":"ai-kubernetes-upgrader","status":"healthy","version":"1.0.0"}
+```
 
 ---
 

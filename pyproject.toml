@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-k8s-upgrader"
+version = "1.0.0"
+description = "Enterprise-grade Kubernetes Upgrade Feasibility, Compatibility, and Risk Assessment Engine"
+readme = "README.md"
+requires-python = ">=3.9, <3.14"
+authors = [
+    { name = "AI-Kubernetes-Upgrader" }
+]
+license = { text = "Apache-2.0" }
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Topic :: System :: Systems Administration",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "flask>=2.3.0",
+    "jinja2>=3.1.0",
+    "packaging>=23.0",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "rich>=13.0.0",
+    "click>=8.1.0",
+    "tabulate>=0.9.0",
+    "gunicorn>=21.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+k8s-upgrade-assess = "ai_k8s_upgrader.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ai_k8s_upgrader*"]
+
+[tool.setuptools.package-data]
+ai_k8s_upgrader = ["templates/*.html", "static/*"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

@@ -50,6 +50,14 @@ ALLOW_LIVE_CLUSTER_DEFAULT = os.environ.get("ALLOW_LIVE_CLUSTER", "false").lower
 MAX_UPLOAD_SIZE = int(os.environ.get("MAX_UPLOAD_SIZE", 5 * 1024 * 1024))  # 5 MB
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "30"))
 RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
+WEB_CONCURRENCY = int(os.environ.get("WEB_CONCURRENCY", "1"))
+
+if WEB_CONCURRENCY > 1:
+    logger.warning(
+        "WEB_CONCURRENCY=%d: InMemoryRateLimiter tracks sliding-window counts in process memory. "
+        "Each gunicorn worker maintains isolated limits. For distributed deployments, configure an external backend.",
+        WEB_CONCURRENCY,
+    )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -297,6 +305,22 @@ def admin_portal():
         logger.warning(f"Unauthorized admin access attempt from {request.remote_addr}")
         return jsonify({"error": "Unauthorized: administrative access is restricted."}), 401
     return jsonify({"status": "authenticated", "message": "Admin control plane active."})
+
+
+# ---------------------------------------------------------------------------
+# Health Check Endpoints (Liveness / Readiness)
+# ---------------------------------------------------------------------------
+
+@app.route("/healthz")
+@app.route("/health")
+def health_check():
+    """Liveness and readiness probe endpoint for hosting environments (e.g. Render)."""
+    return jsonify({
+        "status": "healthy",
+        "service": "ai-kubernetes-upgrader",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat(),
+    }), 200
 
 
 # ---------------------------------------------------------------------------

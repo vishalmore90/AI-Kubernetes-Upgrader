@@ -22,6 +22,7 @@ from ai_k8s_upgrader.assessment_engine import AssessmentEngine
 from ai_k8s_upgrader.scoring_matrix import ScoringEngine
 from ai_k8s_upgrader.reporter import generate_markdown_report, generate_json_report
 from ai_k8s_upgrader.sample_generator import save_sample_cluster, generate_sample_cluster
+from ai_k8s_upgrader.cluster_collector import collect_cluster_state, SnapshotClusterCollector
 
 if sys.platform == "win32":
     if hasattr(sys.stdout, "reconfigure"):
@@ -84,8 +85,6 @@ def _run_assessment(source: str, target: str, mode: str,
                     output_file: str = None,
                     quiet: bool = False):
     """Core assessment logic."""
-    from ai_k8s_upgrader.cluster_collector import collect_cluster_state, SnapshotClusterCollector
-
     if not quiet:
         _print(f"\n[bold]🎯 Assessment:[/] K8s [cyan]{source}[/] → [green]{target}[/]")
         _print(f"[bold]📊 Mode:[/] {mode}\n")
@@ -313,6 +312,41 @@ def serve(host, port, debug):
     _banner()
     from ai_k8s_upgrader.web_dashboard import run_dashboard
     run_dashboard(host=host, port=port, debug=debug)
+
+
+@main.command("validate-snapshot")
+@click.argument("snapshot_path", type=click.Path(exists=True, dir_okay=False))
+def validate_snapshot(snapshot_path):
+    """Validate a cluster snapshot JSON file without running assessment."""
+    _banner()
+    try:
+        with open(snapshot_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        _print(f"[red]❌ Invalid JSON file:[/] {e}")
+        sys.exit(1)
+
+    if not isinstance(data, dict):
+        _print(f"[red]❌ Snapshot root must be a JSON object (dictionary), got {type(data).__name__}[/]")
+        sys.exit(1)
+
+    try:
+        collector = SnapshotClusterCollector(snapshot_path)
+        snapshot = collector.collect()
+    except Exception as e:
+        _print(f"[red]❌ Snapshot collection failed:[/] {e}")
+        sys.exit(1)
+
+    _print(f"[green]✅ Valid Kubernetes Cluster Snapshot:[/] [cyan]{snapshot_path}[/]")
+    _print(f"  • Cluster Version: [bold]{snapshot.k8s_version or 'Not specified'}[/]")
+    _print(f"  • Nodes:           [bold]{len(snapshot.nodes)}[/]")
+    _print(f"  • Deployments:     [bold]{len(snapshot.deployments)}[/]")
+    _print(f"  • CRDs:            [bold]{len(snapshot.crds)}[/]")
+    _print(f"  • Webhooks:        [bold]{len(snapshot.validating_webhooks) + len(snapshot.mutating_webhooks)}[/]")
+    _print(f"  • StorageClasses:  [bold]{len(snapshot.storage_classes)}[/]")
+    if snapshot.all_resources:
+        _print(f"  • Normalized Invs: [bold]{len(snapshot.all_resources)} objects[/]")
+    _print(f"\n[dim]Run full assessment via:[/] [bold]k8s-upgrade-assess assess --source {snapshot.k8s_version or '1.27'} --target 1.30 --snapshot {snapshot_path}[/]\n")
 
 
 @main.command()

@@ -490,5 +490,102 @@ class TestReporter(unittest.TestCase):
         self.assertIn("Control Plane", areas)
 
 
+class TestPackageExports(unittest.TestCase):
+    """Verify that root package exports all expected public APIs."""
+
+    def test_root_exports_present(self):
+        import ai_k8s_upgrader as pkg
+        expected = [
+            "__version__",
+            "AssessmentEngine",
+            "AssessmentResult",
+            "Status",
+            "Severity",
+            "IssueCategory",
+            "ClusterSnapshot",
+            "NodeInfo",
+            "NormalizedResource",
+            "WorkloadResource",
+            "SnapshotClusterCollector",
+            "build_resource_inventory",
+            "collect_cluster_state",
+            "ScoringEngine",
+            "ScoringResult",
+            "RiskMatrixEntry",
+            "generate_markdown_report",
+            "generate_json_report",
+            "generate_sample_cluster",
+            "save_sample_cluster",
+        ]
+        for name in expected:
+            self.assertTrue(hasattr(pkg, name), f"Missing root export: {name}")
+
+    def test_version_matches(self):
+        import ai_k8s_upgrader
+        self.assertEqual(ai_k8s_upgrader.__version__, "1.0.0")
+
+
+class TestCLI(unittest.TestCase):
+    """Verify CLI entrypoint subcommands."""
+
+    def setUp(self):
+        from click.testing import CliRunner
+        self.runner = CliRunner()
+
+    def test_cli_version(self):
+        from ai_k8s_upgrader.cli import main
+        result = self.runner.invoke(main, ["version"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("1.0.0", result.output)
+
+    def test_cli_help(self):
+        from ai_k8s_upgrader.cli import main
+        result = self.runner.invoke(main, ["--help"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("assess", result.output)
+        self.assertIn("validate-snapshot", result.output)
+
+    def test_cli_validate_snapshot_valid(self):
+        from ai_k8s_upgrader.cli import main
+        cluster_data = generate_sample_cluster("1.27", "1.30")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump(cluster_data, f)
+            path = f.name
+        try:
+            result = self.runner.invoke(main, ["validate-snapshot", path])
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("Valid Kubernetes Cluster Snapshot", result.output)
+            self.assertIn("Nodes:", result.output)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_cli_validate_snapshot_invalid_json(self):
+        from ai_k8s_upgrader.cli import main
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            f.write("{invalid json")
+            path = f.name
+        try:
+            result = self.runner.invoke(main, ["validate-snapshot", path])
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Invalid JSON file", result.output)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_cli_validate_snapshot_non_dict(self):
+        from ai_k8s_upgrader.cli import main
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump(["not", "a", "dict"], f)
+            path = f.name
+        try:
+            result = self.runner.invoke(main, ["validate-snapshot", path])
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Snapshot root must be a JSON object", result.output)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -20,6 +20,7 @@ setup(
         "rich>=13.0.0",
         "click>=8.1.0",
         "tabulate>=0.9.0",
+        "gunicorn>=21.2.0",
     ],
     entry_points={
         "console_scripts": [

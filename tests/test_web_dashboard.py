@@ -49,6 +49,23 @@ class TestWebDashboard(unittest.TestCase):
         self.assertIn("Public Demo Mode", html)
         self.assertIn("Disabled in Public Demo", html)
 
+    def test_healthz_endpoint(self):
+        """GET /healthz should return 200 with service health status."""
+        response = self.client.get("/healthz")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data.get("status"), "healthy")
+        self.assertEqual(data.get("service"), "ai-kubernetes-upgrader")
+        self.assertEqual(data.get("version"), "1.0.0")
+        self.assertIn("timestamp", data)
+
+    def test_health_alias_endpoint(self):
+        """GET /health should also return 200 matching /healthz."""
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data.get("status"), "healthy")
+
     # -----------------------------------------------------------------------
     # Sample Mode
     # -----------------------------------------------------------------------
